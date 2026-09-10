@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.workbuddy/
+*.log
+_*.txt
+_probe.txt
+_npm.log
+.DS_Store

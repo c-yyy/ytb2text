@@ -1,0 +1,18 @@
+{
+  "name": "video2text-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "浏览器本地运行的视频转文字插件（Whisper + Transformers.js，0 API 成本）",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "preview": "vite build && echo 请在 chrome://extensions 加载 dist 目录"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.7.5"
+  },
+  "devDependencies": {
+    "vite": "^6.3.5"
+  }
+}
