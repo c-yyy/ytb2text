@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>视频转文字助手 · Offscreen</title>
+  </head>
+  <body>
+    <!--
+      Offscreen Document：真正干活的地方。
+      扩展页面拥有完整的 DOM / WebGPU / WebAudio / MediaRecorder，
+      而 MV3 的 Service Worker 什么都没有，所以录音 + 解码 + 推理全放这里。
+
+      加载顺序有讲究：
+        1. lib/tf-loader.js 是 type="module"，负责把 vendored 的 Transformers.js
+           挂到 window.__V2T_TF。**不能写成内联脚本** —— MV3 的 CSP 没有
+           'unsafe-inline'，内联的 <script type="module"> 会被直接拦掉。
+        2. 其余 lib 是普通脚本，按依赖顺序摆放即可。
+           tf-loader 是 defer 执行，lib/asr.js 里惰性读全局，不存在时序问题。
+    -->
+    <script type="module" src="./lib/tf-loader.js"></script>
+
+    <script src="./lib/constants.js"></script>
+    <script src="./lib/audio.js"></script>
+    <script src="./lib/export.js"></script>
+    <script src="./lib/asr.js"></script>
+    <script src="./offscreen.js"></script>
+  </body>
+</html>

@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>视频转文字助手 · 隐私政策</title>
+    <style>
+      :root {
+        --ink: #14161a;
+        --accent: #4f46e5;
+        --accent-dark: #3a30b8;
+        --muted: #6b7280;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 32px 18px 64px;
+        background: #f7f7fb;
+        color: var(--ink);
+        font: 15px/1.75 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+          'Microsoft YaHei', Roboto, sans-serif;
+      }
+      .wrap {
+        max-width: 720px;
+        margin: 0 auto;
+      }
+      .card {
+        background: #fff;
+        border: 3px solid var(--ink);
+        border-radius: 12px;
+        box-shadow: 6px 6px 0 var(--ink);
+        overflow: hidden;
+      }
+      header {
+        padding: 16px 20px;
+        background: var(--accent);
+        color: #fff;
+        border-bottom: 3px solid var(--ink);
+      }
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+      }
+      header p {
+        margin: 4px 0 0;
+        font-size: 13px;
+        opacity: 0.92;
+      }
+      main {
+        padding: 20px 22px 26px;
+      }
+      h2 {
+        font-size: 15px;
+        margin: 22px 0 8px;
+        padding-bottom: 5px;
+        border-bottom: 2px solid var(--ink);
+      }
+      h2:first-child {
+        margin-top: 0;
+      }
+      p,
+      li {
+        margin: 6px 0;
+      }
+      ul {
+        padding-left: 20px;
+      }
+      .hl {
+        background: #eef2ff;
+        border: 2px dashed var(--accent);
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin: 14px 0;
+      }
+      .hl strong {
+        color: var(--accent-dark);
+      }
+      code {
+        background: #f3f4f6;
+        border: 1px solid #e5e7eb;
+        border-radius: 4px;
+        padding: 0 5px;
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+        font-size: 13px;
+      }
+      .meta {
+        margin-top: 26px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      a {
+        color: var(--accent-dark);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <header>
+          <h1>视频转文字助手 · 隐私政策</h1>
+          <p>最后更新：2026-09-11</p>
+        </header>
+        <main>
+          <div class="hl">
+            <p>
+              <strong>一句话总结：</strong>音频与模型全部在你的本机浏览器里处理，
+              <strong>不上传任何音频</strong>，不需要 API Key，也不收集、不上报任何使用数据。
+            </p>
+          </div>
+
+          <h2>1. 插件处理了什么数据</h2>
+          <ul>
+            <li>
+              <strong>音频数据</strong>：来自你选择的音频来源（录制当前标签页的声音 /
+              你挑选的本地音视频文件 / 页面内视频的媒体直链）。音频在浏览器进程内被解码为
+              16kHz 单声道 PCM，然后交给本地的 Whisper 模型做语音识别。
+              <strong>音频不会被发送到任何服务器</strong>。
+            </li>
+            <li>
+              <strong>转录结果</strong>：文字结果只保留在当前页面内与扩展的本地存储
+              （<code>chrome.storage.local</code>）中，用于刷新页面后恢复上次结果。
+              只有在你主动点击「复制 / TXT / SRT / VTT」时，内容才会离开扩展。
+            </li>
+            <li>
+              <strong>设置项</strong>：模型、语言、运行设备、下载源等偏好保存在本地。
+            </li>
+          </ul>
+
+          <h2>2. 插件会发起哪些网络请求</h2>
+          <ul>
+            <li>
+              <strong>下载模型权重</strong>：首次使用某个模型时，会从你选择的下载源
+              （默认 <code>hf-mirror.com</code>，可切换为 <code>huggingface.co</code>）
+              拉取 ONNX 权重文件，随后由浏览器缓存。<strong>请求中不包含你的音频</strong>，
+              只是普通的文件下载。
+            </li>
+            <li>
+              <strong>抓取你指定的媒体</strong>：当你选择「页面内视频」并点击转录时，
+              插件会按该媒体在页面上的直链地址下载文件（与你在页面上播放时访问的是同一个地址）。
+            </li>
+            <li>
+              <strong>读取页面自带字幕</strong>：当你点击「直接取字幕」时，
+              插件会请求该页面已公开的字幕地址。
+            </li>
+          </ul>
+          <p>除此之外，插件不发起任何网络请求；不含统计、埋点、广告或崩溃上报 SDK。</p>
+
+          <h2>3. 权限用途</h2>
+          <ul>
+            <li><code>tabCapture</code>：录制你主动点击「录制当前标签页」时的标签页声音。</li>
+            <li><code>offscreen</code>：在后台文档里运行录音与模型推理。</li>
+            <li><code>storage</code> / <code>unlimitedStorage</code>：保存设置与模型缓存。</li>
+            <li><code>scripting</code> / <code>activeTab</code>：注入页面内面板、读取页面已公开的字幕轨。</li>
+            <li>
+              <code>host_permissions</code>：下载模型权重，以及按你指定的地址下载页面内媒体。
+            </li>
+          </ul>
+
+          <h2>4. 数据共享</h2>
+          <p>
+            不共享。插件没有后端服务，开发者无法访问你的音频、转录文本或任何使用记录。
+          </p>
+
+          <h2>5. 第三方组件</h2>
+          <ul>
+            <li>
+              <a href="https://github.com/huggingface/transformers.js" target="_blank" rel="noreferrer"
+                >Transformers.js</a
+              >
+              与 ONNX Runtime Web —— 本地推理运行时（已随扩展打包，不从 CDN 加载）。
+            </li>
+            <li>
+              Whisper 模型权重 —— 由 OpenAI 发布，经 HuggingFace 分发；下载来源可在设置中切换。
+            </li>
+          </ul>
+
+          <h2>6. 你的控制权</h2>
+          <ul>
+            <li>随时卸载扩展即可停止全部处理，并清空本地保存的设置与结果。</li>
+            <li>
+              模型缓存位于浏览器的 Cache Storage，可通过 Chrome 的「清除浏览数据」删除。
+            </li>
+            <li>不录制、不转录时，插件不会访问任何音频。</li>
+          </ul>
+
+          <h2>7. 联系方式</h2>
+          <p>
+            有任何隐私相关疑问，请在
+            <a href="https://github.com/c-yyy/ytb2text/issues" target="_blank" rel="noreferrer"
+              >项目仓库</a
+            >
+            提 issue。
+          </p>
+
+          <p class="meta">
+            本政策如有更新，会同步修改本页面顶部的「最后更新」日期。
+          </p>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

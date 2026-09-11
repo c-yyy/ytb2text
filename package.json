@@ -1,18 +1,19 @@
 {
-  "name": "video2text-extension",
-  "version": "0.1.0",
+  "name": "ytb2text",
+  "version": "0.2.0",
   "private": true,
-  "type": "module",
-  "description": "浏览器本地运行的视频转文字插件（Whisper + Transformers.js，0 API 成本）",
+  "description": "视频转文字助手 —— 浏览器本地跑 Whisper 的 Chrome MV3 插件，音频不出本机、0 API 成本",
   "scripts": {
-    "dev": "vite build --watch",
-    "build": "vite build",
-    "preview": "vite build && echo 请在 chrome://extensions 加载 dist 目录"
-  },
-  "dependencies": {
-    "@huggingface/transformers": "^3.7.5"
+    "vendor": "node tools/vendor.js",
+    "check": "node tools/selfcheck.js",
+    "smoke": "node tools/smoke.js",
+    "smoke:full": "node tools/smoke.js --with-inference",
+    "verify": "node tools/selfcheck.js && node tools/smoke.js",
+    "pack": "bash tools/pack.sh",
+    "zip": "bash tools/zip.sh"
   },
   "devDependencies": {
-    "vite": "^6.3.5"
+    "@huggingface/transformers": "3.7.5",
+    "crx3": "^1.1.3"
   }
 }

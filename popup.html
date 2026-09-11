@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>视频转文字助手</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="card">
+      <header class="head">
+        <div class="logo">视频转文字<span class="tag">V2T</span></div>
+        <div class="ver" id="ver">v0.2.0</div>
+      </header>
+
+      <section class="notice">
+        <strong>关于隐私与成本</strong>
+        <p>
+          Whisper 模型在你的<em>本机浏览器</em>里跑，音频<em>不会上传</em>到任何服务器，
+          也不需要填 API Key —— 运行过程<em>0 调用成本</em>。
+        </p>
+      </section>
+
+      <section class="block">
+        <h3>怎么用</h3>
+        <ol>
+          <li>打开任意有视频的页面，右下角会出现靛蓝色<em>悬浮按钮</em>。</li>
+          <li>点开面板，选一种音频来源：<em>录制标签页</em> / <em>本地文件</em> / <em>页面内视频</em>。</li>
+          <li>等进度条走完，结果可直接<em>复制</em>或导出 <em>TXT / SRT / VTT</em>。</li>
+        </ol>
+      </section>
+
+      <section class="block">
+        <h3>说明</h3>
+        <ul>
+          <li>首次转录会下载一次模型（Base 约 75MB），之后由浏览器缓存，<b>完全离线可跑</b>。</li>
+          <li>有独显时自动走 <b>WebGPU</b>，接近实时；纯 CPU 下会慢一些。</li>
+          <li>带字幕的站点（如 YouTube）可直接取字幕，<b>不用跑模型</b>。</li>
+          <li>“录制标签页”是实时的：10 分钟视频要播 10 分钟，最长 15 分钟。</li>
+        </ul>
+      </section>
+
+      <footer class="foot">
+        <button id="open" class="primary">在当前页面打开面板</button>
+      </footer>
+      <p class="err" id="err" hidden></p>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

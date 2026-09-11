@@ -1,8 +1,15 @@
+# 依赖与构建产物（lib/ 下的 vendored 运行时是**要提交**的，别加进来）
 node_modules/
-dist/
-.workbuddy/
-*.log
-_*.txt
-_probe.txt
-_npm.log
+
+# 打包产物与私钥
+release/
+*.crx
+*.zip
+*.pem
+*.key
+
+# 编辑器 / 系统
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/

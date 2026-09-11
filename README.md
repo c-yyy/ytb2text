@@ -1,106 +1,205 @@
 # 视频转文字助手 · 本地 AI
 
-一个 Chrome MV3 浏览器插件：用 Whisper 在**浏览器本地**把视频 / 音频转成文字。
-音频不出本机、不需要 API Key、**0 调用成本**。
+一个 Chrome MV3 插件：用 Whisper 在**浏览器本地**把视频 / 音频转成文字。
+音频不出本机、不需要 API Key、**运行过程 0 调用成本**。
+
+UI 与项目结构对标 [Bili-Mux（哔哩喵）](https://github.com/c-yyy/bili-mux) 的做法：
+**无构建**（纯 JS 平铺根目录）、**页面内注入面板**（右下角悬浮按钮 → 页内卡片）、
+**Offscreen Document 干重活**。
 
 ---
 
 ## 快速开始
 
 ```bash
-npm install
-npm run build          # 产出 dist/
+npm install          # 只装开发依赖（transformers / crx3）
+npm run vendor       # 把运行时抽到 lib/transformers/（已提交，通常不用跑）
 ```
 
 然后：
 
 1. 打开 `chrome://extensions`，右上角打开**开发者模式**
-2. 点「加载已解压的扩展程序」，选择项目里的 `dist/` 目录
-3. 点工具栏插件图标 → 侧边栏打开（Chrome 116+）
+2. 点「加载已解压的扩展程序」，选择**项目根目录**（不是 dist，本项目没有构建产物）
+3. 打开任意有视频的网页，右下角会出现靛蓝色悬浮按钮 → 点开就是面板
 
-首次转录会下载一次模型权重（Base/q8 约 75MB），之后由浏览器 Cache Storage 缓存，**完全离线可跑**。
+首次转录会下载一次模型权重（Base/q8 约 75MB），之后由浏览器 Cache Storage 缓存，
+**完全离线可跑**。
 
-> 开发时用 `npm run dev` 可以 watch 构建，改完代码回 `chrome://extensions` 点一下刷新即可。
-
----
-
-## 对你那份方案的 5 处关键修正
-
-原方案方向是对的，但有几个会直接导致「跑不起来」或「转出来是乱码」的点：
-
-| # | 原方案 | 问题 | 本项目的做法 |
-|---|--------|------|--------------|
-| 1 | `Xenova/whisper-tiny.en` | **`.en` 是纯英文模型，中文会被强行音译成一堆英文字母**。中文必须用多语言版 | 默认 `Xenova/whisper-base`（多语言），语言下拉里可强制 `zh` |
-| 2 | 「yt-dlp 逻辑」 | 插件里**跑不了二进制程序**。yt-dlp 是 Python/可执行文件，浏览器扩展无法调用 | 改用三条纯 Web 链路：`chrome.tabCapture` 录标签页声 / 抓页面 `<video>` 直链 / 用户选本地文件 |
-| 3 | 「推理放在 Background Script」 | MV3 的 Service Worker 里**没有 WebGPU、没有 AudioContext、没有 MediaRecorder**，而且随时会被回收 | 真正的推理放在 **Offscreen Document**（完整的 Extension Page 环境），SW 只做消息转发和 `tabCapture` 授权 |
-| 4 | 直接 `import` Transformers.js | MV3 的 CSP 禁止加载远程脚本，而 ONNX Runtime 默认会从 jsDelivr 拉 `.wasm` | 构建时把 `ort-*.wasm / ort-*.mjs` 拷到 `dist/ort/`，并把 `env.backends.onnx.wasm.wasmPaths` 指到本地 |
-| 5 | 从 HuggingFace 下模型 | 国内直连 `huggingface.co` 经常极慢或不通 | 内置「模型下载源」选项，默认 `hf-mirror.com` 镜像（路径结构与官方一致） |
-
-另外补了一点原方案没提的：**如果页面本身带字幕（比如 YouTube），直接取字幕比跑 ASR 快 100 倍且 100% 准确** —— 侧边栏会列出来，能取就别转录。
+> 验证：`npm run check`（静态自检）+ `npm run smoke`（真机装扩展跑一遍 UI）。
+> 想连模型推理一起验：`npm run smoke:full`。
 
 ---
 
-## 架构
+## 和参考项目的对应关系
+
+| | bili-mux | 本项目 |
+|---|---|---|
+| 构建 | 无构建，纯 JS 平铺根目录 | 同 |
+| UI 载体 | 页面内注入面板 + popup | 同 |
+| 重活位置 | Offscreen Document 跑 ffmpeg.wasm | Offscreen Document 跑 Whisper |
+| 依赖落地 | `lib/ffmpeg/` 本地 vendored | `lib/transformers/` 本地 vendored |
+| 二进制传输 | 分块 base64（消息通道不支持 ArrayBuffer） | 同（且先在页面侧解码成 16kHz PCM，体积小一个数量级） |
+| 视觉 | 粗黑边 + 硬投影 + B站粉 | 同款语言，主色换靛蓝 `#4f46e5` |
+
+---
+
+## 项目结构
 
 ```
-┌──────────────┐   chrome.runtime    ┌──────────────────┐
-│  Side Panel  │ ──────────────────► │  Service Worker  │
-│  (侧边栏 UI) │                     │  消息转发 / 授权  │
-└──────────────┘                     └────────┬─────────┘
-       ▲                                      │ 转发
-       │ progress / result                    ▼
-       │                          ┌──────────────────────────┐
-       └──────────────────────────┤  Offscreen Document      │
-                                  │  ├─ MediaRecorder 录音   │
-                                  │  ├─ WebAudio 解码→16kHz │
-                                  │  └─ Transformers.js      │
-                                  │      Whisper (WebGPU/WASM)│
-                                  └──────────────────────────┘
+ytb2text/
+├── manifest.json              # MV3 清单：权限、content_scripts、CSP
+├── content.js                 # 页面侧：悬浮按钮 + 页内面板 UI + 三条音频链路
+├── content.css                # 面板样式（锁在 #v2t-root 下，带一套重置）
+├── background.js              # Service Worker：消息路由 + Offscreen 生命周期 + tabCapture
+├── offscreen.html             # Offscreen 页（加载 vendored 运行时）
+├── offscreen.js               # Offscreen：录音 / 解码 / 推理 / 分块收发
+├── popup.html / .css / .js    # 扩展弹窗：说明 + 打开面板
+├── lib/
+│   ├── tf-loader.js           # 以 ESM 载入 transformers 并挂到全局
+│   ├── constants.js           # 模型 / 语言 / 设备 / 下载源元数据
+│   ├── audio.js               # 任意音频 → 16kHz 单声道 Float32Array
+│   ├── asr.js                 # Whisper 封装：设备探测、精度回退、分块、噪声过滤
+│   ├── export.js              # TXT / SRT / VTT 格式化与下载
+│   └── transformers/          # vendored 运行时（约 32MB，随仓库提交）
+├── icons/
+├── tools/
+│   ├── vendor.js              # 从 node_modules 抽运行时到 lib/
+│   ├── selfcheck.js           # 静态自检：文件引用 / 样式类名 / 常量一致性
+│   ├── smoke.js               # 真机冒烟测试（CDP 驱动本机 Chrome）
+│   ├── pack.sh                # 打 .crx
+│   └── zip.sh                 # 打商店 zip
+└── docs/privacy.html          # 隐私政策（上架用）
 ```
 
-- `src/sidepanel.*` — 侧边栏 UI（来源选择、设置、进度、结果、TXT/SRT/VTT 导出）
-- `src/background.js` — Service Worker：开侧边栏、创建 Offscreen、调 `tabCapture.getMediaStreamId`
-- `src/offscreen.js` — 录音 + 解码 + 推理
-- `src/lib/asr.js` — Whisper 封装：设备探测、精度回退链、分块、噪声过滤
-- `src/lib/audio.js` — 任意音频 → 16kHz 单声道 Float32Array（Whisper 的硬要求）
-- `public/content.js` — 页面侧扫描 `<video>/<audio>` 与自带字幕轨（不参与打包）
-
-### 运行后端的选择逻辑
-
-```
-auto  → 有 WebGPU?  ──是──►  webgpu / fp16  ──失败──►  webgpu / fp32  ──失败──►  wasm / q8
-                └─否────────────────────────────────────────────────────────────►  wasm / q8
-```
-
-WebGPU 下 base 模型通常能做到接近实时；CPU(WASM) 下大约是实时速度的 0.3~1 倍，长视频建议先切 tiny 试试。
+`lib/` 下的四个脚本是**普通脚本**（不是 ESM），各自往全局 `V2T` 命名空间挂东西。
+原因：同一份文件要同时被 manifest 的 `content_scripts.js`（页面侧）和
+`offscreen.html` 的 `<script src>`（扩展页）加载，用不了模块系统。
 
 ---
 
 ## 三种音频来源
 
 | 来源 | 适用场景 | 限制 |
-|------|----------|------|
-| **录制当前标签页** | 任何能播的站点（YouTube / B站 / 腾讯视频 / 网课…） | 必须**实时播放**（1 倍速），最长 15 分钟自动停止；Chrome 会显示「正在共享此标签页」提示条 |
-| **本地音视频文件** | 已经下载好的 mp4/mp3/wav/webm… | 最稳定，不依赖播放 |
-| **页面内视频** | 页面 `<video>` 是 http(s) 直链时 | blob: / m3u8 之类的流媒体地址拿不到原始文件，此时请用「录制」 |
+|---|---|---|
+| **录制当前标签页** | 任何能播的站点（YouTube / B站 / 腾讯视频 / 网课…） | 必须实时播放，最长 15 分钟自动停止 |
+| **本地音视频文件** | 已下载好的 mp4 / mp3 / wav / webm… | 最稳定，不依赖播放 |
+| **页面内视频** | 页面 `<video>` 是 http(s) 直链时 | blob: / m3u8 拿不到原始文件，请用「录制」 |
 
-YouTube 等站点如果检测到自带字幕，页面内视频面板会额外列出「直接取字幕」，点了秒出、不跑模型。
+页面自带字幕的站点（YouTube 等）会额外列出「直接取字幕」——**能取就别跑模型**，
+快 100 倍且 100% 准确。
+
+---
+
+## 踩过的坑（都是真机验证出来的）
+
+### 1. `worker-src 'self' blob:` 会让扩展直接装不上
+
+我最初照抄参考项目的 CSP 写法，Chrome 152 直接拒绝加载：
+
+```
+'content_security_policy.extension_pages': Insecure CSP value "blob:" in directive 'worker-src'
+```
+
+`extensions.loadUnpacked` 会把这个错直接抛出来。**当前 manifest 里已经没有 worker-src 了**。
+（原仓库 `public/manifest.json` 有同样的问题，建议一并修掉。）
+
+### 2. CSP 会拦掉 HTML 里的内联 `<script type="module">`
+
+`extension_pages` 的 `script-src 'self'` 没有 `'unsafe-inline'`，所以
+offscreen.html 里不能写内联模块脚本 —— 表现为运行时静默不加载，只有控制台报
+`Executing inline script violates the following Content Security Policy directive`。
+改成外部文件 `lib/tf-loader.js` 后正常。
+
+### 3. `chrome.runtime.sendMessage` 不支持 ArrayBuffer
+
+JSON 序列化会把 `ArrayBuffer` 变成 `{}`。所以跨进程的音频一律走**分块 base64**。
+本项目更进一步：**在页面侧就用 WebAudio 解码成 16kHz 单声道 Float32Array 再传**，
+传的是 PCM 而不是整个 mp4 容器，体积小一个数量级，也就不需要动辄几百 MB 的消息。
+
+### 4. Offscreen 和 SW 会各收到一份 content 的消息
+
+`chrome.runtime.sendMessage` 会广播给扩展的每个上下文。content 发的指令，
+SW 和 offscreen 都会收到 —— 不设门槛的话同一条指令被处理两遍（分块重复累加）。
+本项目的约定是：**offscreen 只认带 `_forwarded: true` 的消息**，那是 SW 补上的。
+
+### 5. 长任务不要让 SW 吊着端口
+
+推理要几分钟，用「请求-等响应」会让 SW 一直维持端口，容易被回收。
+做法是：offscreen 收到长任务**立刻 ACK**，进度与结果走 `target:'ui'` 广播，
+由 SW 转发到页面里的面板，面板按 `requestId` 过滤。SW 因此无需维护任何任务映射。
+
+### 6. 面板 DOM 不能用 innerHTML
+
+部分站点（Google 系）强制 Trusted Types，`innerHTML =` 会直接抛错。
+面板全部用 `createElement` 拼。
+
+### 7. 读页面变量必须注入 MAIN world
+
+content script 跑在隔离世界，看不到页面的 `window.ytInitialPlayerResponse`
+（YouTube 字幕轨道就挂在那儿）。要读它必须由 SW 用
+`chrome.scripting.executeScript({ world: 'MAIN' })` 注入。
+
+---
+
+## 运行后端的选择逻辑
+
+```
+auto  → 有 WebGPU?  ──是──►  webgpu / fp16  ──失败──►  webgpu / fp32  ──失败──►  wasm / q8
+                └─否──────────────────────────────────────────────────────────►  wasm / q8
+```
+
+WebGPU 下 base 模型通常接近实时；CPU(WASM) 下约 0.3~1 倍速，长视频建议先切 tiny。
+扩展页拿不到 `SharedArrayBuffer`（没有 COOP/COEP），所以 WASM 线程数固定为 1，
+代码里显式写死了 `numThreads = 1`，省掉 ORT 每次的探测与告警。
 
 ---
 
 ## 已知限制
 
-- **录制是实时的**：10 分钟视频要播 10 分钟。想快进就只能用「本地文件」或「页面直链」。
-- **取消不是真中断**：目前只在分块边界生效，正在算的 30s 块会算完。
-- **`dist/assets/` 下会多一份 `ort-wasm-*.wasm`（约 21MB）**，与 `dist/ort/` 内容重复。这是 Rollup 自动产出的资源副本，保留它是为了在 `wasmPaths` 未生效时仍有兜底；打包发布时可以手动删掉。
-- **首次模型下载**：Base/q8 约 75MB，Small/q8 约 250MB；WebGPU 走 fp16 会翻倍。
-- **`hf-mirror.com` 是第三方镜像**，介意的话在「模型下载源」里切回 HuggingFace 官方。
+- **“录制标签页”是实时的**：10 分钟视频要播 10 分钟，想快只能用「本地文件」或「页面直链」。
+- **取消只在分块边界生效**：正在算的 30s 块会算完。
+- **`<all_urls>` 权限偏大**：为了抓任意站点的媒体直链和图省事，上架前建议收窄
+  （用 `activeTab` + 用户手势触发），或直接只保留录制链路。
+- 首次模型下载：Base/q8 约 75MB，Small/q8 约 250MB；WebGPU 走 fp16 会翻倍。
+- **`hf-mirror.com` 是第三方镜像**，介意的话在设置里切回 HuggingFace 官方。
+
+---
+
+## 权限说明
+
+| 权限 | 用途 |
+|---|---|
+| `tabCapture` | 录制当前标签页的声音 |
+| `offscreen` | 创建 Offscreen Document（SW 里跑不了模型/录音） |
+| `storage` | 记住设置与上次结果 |
+| `scripting` | 兜底注入面板；注入 MAIN world 读页面字幕轨 |
+| `activeTab` | 拿当前标签页 id |
+| `unlimitedStorage` | 模型缓存（Cache Storage）体积不受限 |
+| `host_permissions` | 抓页面媒体直链 + 从镜像站下模型权重 |
+
+---
+
+## 隐私
+
+音频与模型**全部在本机处理**，不经过任何服务器，也不上报任何使用数据。
+详见 [隐私政策](docs/privacy.html)。
+
+---
+
+## 打包发布
+
+```bash
+bash tools/pack.sh    # 生成 release/ytb2text-<version>.crx（首次会生成 ytb2text.pem，务必备份）
+bash tools/zip.sh     # 生成 release/ytb2text-<version>.zip（商店上架用）
+```
+
+`ytb2text.pem` 是私钥，已在 `.gitignore` 里 —— 丢了扩展 ID 就变，已安装的用户要重装。
 
 ---
 
 ## 可以接着做的
 
-- 接 VAD（Silero）先切人声段，跳过静音，长音频能快 30%+
+- 接 VAD（Silero）先切人声段、跳过静音，长音频能快 30%+
 - 真正的流式：边录边转，不用等录完
-- 字幕翻译/摘要（本地用小 LLM，或做成可选的自带 API Key 通道）
-- 打包发布到 Chrome 应用商店（需要先去掉 `<all_urls>` 收窄权限）
+- 字幕翻译 / 摘要（本地小 LLM，或做成可选的自带 API Key 通道）
+- 结果面板里做「点时间轴跳到视频对应位置」

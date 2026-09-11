@@ -1,0 +1,170 @@
+/*
+ * popup.css —— 扩展弹窗样式。
+ * 与页面内面板同一套视觉语言：3px 黑边 + 硬投影 + 靛蓝主色。
+ */
+
+:root {
+  --ink: #14161a;
+  --accent: #4f46e5;
+  --accent-dark: #3a30b8;
+  --muted: #6b7280;
+  --paper: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 344px;
+  background: #f7f7fb;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
+    Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
+.card {
+  margin: 10px;
+  background: var(--paper);
+  border: 3px solid var(--ink);
+  border-radius: 10px;
+  box-shadow: 5px 5px 0 var(--ink);
+  overflow: hidden;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 13px;
+  background: var(--accent);
+  color: #fff;
+  border-bottom: 3px solid var(--ink);
+}
+
+.logo {
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: 0.3px;
+}
+
+.tag {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  background: #fff;
+  color: var(--accent-dark);
+  border: 2px solid var(--ink);
+  border-radius: 4px;
+  padding: 0 4px;
+  vertical-align: middle;
+}
+
+.ver {
+  font-size: 11px;
+  opacity: 0.92;
+}
+
+.notice {
+  margin: 12px;
+  padding: 10px 11px;
+  background: #eef2ff;
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+}
+
+.notice strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--accent-dark);
+}
+
+.notice p {
+  margin: 0;
+  font-size: 12px;
+}
+
+.notice em {
+  font-style: normal;
+  font-weight: 700;
+}
+
+.block {
+  padding: 0 13px 8px;
+}
+
+.block h3 {
+  font-size: 12px;
+  margin: 10px 0 6px;
+  padding-bottom: 4px;
+  border-bottom: 2px solid var(--ink);
+}
+
+.block ol,
+.block ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.block li {
+  margin: 4px 0;
+  font-size: 12px;
+}
+
+.block em {
+  font-style: normal;
+  font-weight: 700;
+  color: var(--accent-dark);
+}
+
+.block b {
+  color: var(--accent-dark);
+}
+
+.foot {
+  padding: 12px 13px;
+  border-top: 3px solid var(--ink);
+  background: #fafafa;
+}
+
+button.primary {
+  width: 100%;
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--accent);
+  border: 2px solid var(--ink);
+  border-radius: 7px;
+  cursor: pointer;
+  box-shadow: 3px 3px 0 var(--ink);
+  transition: background 0.12s, transform 0.08s, box-shadow 0.08s;
+}
+
+button.primary:hover {
+  background: var(--accent-dark);
+}
+
+button.primary:active {
+  transform: translate(1px, 1px);
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.err {
+  margin: 0 13px 12px;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 2px solid #b91c1c;
+  border-radius: 7px;
+}
