@@ -1,6 +1,8 @@
 /**
  * popup.js —— 扩展弹窗。
- * 只做一件事：把「打开面板」的请求交给 Service Worker（它才知道怎么在受限页面上兜底注入）。
+ * 两件事：
+ *   1. 把「打开面板」的请求交给 Service Worker（它才知道怎么在受限页面上兜底注入）
+ *   2. 「检测本页」：问页面里挂上了的原生入口到底卡在哪一步
  * 版本号从 manifest 读，避免和 manifest.json 里的版本号对不上。
  */
 'use strict';
@@ -8,6 +10,8 @@
 document.addEventListener('DOMContentLoaded', function () {
   var verEl = document.getElementById('ver');
   var openBtn = document.getElementById('open');
+  var probeBtn = document.getElementById('probe');
+  var diagEl = document.getElementById('diag');
   var errEl = document.getElementById('err');
 
   try {
@@ -37,6 +41,54 @@ document.addEventListener('DOMContentLoaded', function () {
       .catch(function (e) {
         openBtn.disabled = false;
         showError('无法在当前页面打开面板：' + ((e && e.message) || e));
+      });
+  });
+
+  // 把自检结果翻译成人话，重点是回答「卡在哪一步」
+  function describe(s) {
+    if (!s) return '没拿到页面状态（页面可能刚刷新，再点一次试试）。';
+    var out = [];
+    out.push('页面：' + s.host);
+
+    if (!s.supported) {
+      out.push('✗ 这个站点没有配置原生入口（目前只做了 YouTube 观看页）。');
+      out.push(s.fabVisible ? '→ 用右下角的悬浮按钮打开面板即可。' : '→ 也看不到悬浮按钮：试试刷新页面，或在浏览器扩展页里点「重新加载」。');
+      return out.join('\n');
+    }
+
+    out.push('✓ 命中站点规则：' + s.siteName);
+    out.push((s.anchorFound ? '✓ 找到可挂载的操作栏' : '✗ 没找到可挂载的操作栏') +
+      (s.anchorFound ? '（' + s.anchorId + '）' : '（还没渲染出来，或已被折叠）'));
+    out.push((s.mounted ? '✓ 入口已插入 DOM' : '✗ 入口还没插入'));
+    if (s.mounted && !s.visible) out.push('✗ 插进去了但不可见（容器被折叠）');
+    if (s.plainSkin) out.push('! 用的是兜底样式（没抄到站点原生外观）');
+    out.push((s.fabVisible ? '✓ 悬浮按钮可见（可兜底使用）' : '· 悬浮按钮已收起（入口正常）'));
+    out.push('操作栏探测：flexible=' + (s.flexVisible ? '可见' : '折叠') +
+      '（共 ' + s.flexTotal + ' 个）｜topLevel=' + (s.topVisible ? '可见' : '折叠'));
+
+    if (s.mounted && s.visible && !s.plainSkin) out.push('→ 一切正常。');
+    else if (s.fabVisible) out.push('→ 入口没挂上，但悬浮按钮在，先点那个用。');
+    else out.push('→ 两个入口都没有：在扩展页点「重新加载」后刷新本页。');
+    return out.join('\n');
+  }
+
+  probeBtn.addEventListener('click', function () {
+    errEl.hidden = true;
+    probeBtn.disabled = true;
+    diagEl.textContent = '正在检测…';
+    chrome.runtime
+      .sendMessage({ target: 'sw', type: 'panel:status', payload: {} })
+      .then(function (res) {
+        probeBtn.disabled = false;
+        if (!res || !res.ok) {
+          diagEl.textContent = '检测失败：' + ((res && res.error) || '未知原因');
+          return;
+        }
+        diagEl.textContent = describe(res.status);
+      })
+      .catch(function (e) {
+        probeBtn.disabled = false;
+        diagEl.textContent = '检测失败：' + ((e && e.message) || e);
       });
   });
 });

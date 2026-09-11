@@ -24,7 +24,10 @@
       <section class="block">
         <h3>怎么用</h3>
         <ol>
-          <li>打开任意有视频的页面，右下角会出现靛蓝色<em>悬浮按钮</em>。</li>
+          <li>
+            打开有视频的页面：<em>YouTube 观看页</em>会在「分享 / 保存」那一行多出一个
+            <em>「转文字」按钮</em>；其它页面用右下角的<em>悬浮按钮</em>。
+          </li>
           <li>点开面板，选一种音频来源：<em>录制标签页</em> / <em>本地文件</em> / <em>页面内视频</em>。</li>
           <li>等进度条走完，结果可直接<em>复制</em>或导出 <em>TXT / SRT / VTT</em>。</li>
         </ol>
@@ -36,8 +39,14 @@
           <li>首次转录会下载一次模型（Base 约 75MB），之后由浏览器缓存，<b>完全离线可跑</b>。</li>
           <li>有独显时自动走 <b>WebGPU</b>，接近实时；纯 CPU 下会慢一些。</li>
           <li>带字幕的站点（如 YouTube）可直接取字幕，<b>不用跑模型</b>。</li>
-          <li>“录制标签页”是实时的：10 分钟视频要播 10 分钟，最长 15 分钟。</li>
+          <li>流媒体（YouTube / B站等）拿不到原始文件，面板里会显示为<b>「边播边录」</b>，按播放速度实时录，最长 15 分钟。</li>
         </ul>
+      </section>
+
+      <section class="block">
+        <h3>本页入口检测</h3>
+        <p class="diag" id="diag">按钮没出现时，点一下下面的检测，看是哪一步没走通。</p>
+        <button id="probe" class="ghost">检测本页</button>
       </section>
 
       <footer class="foot">

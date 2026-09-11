@@ -237,6 +237,62 @@ async function main() {
     console.log('\n  （截图失败：' + e.message + '）');
   }
 
+  // 9. 容器被折叠时（窗口窄 → YouTube 把「保存/下载」收进 ⋮ 菜单）：
+  //    入口必须改挂到「赞/踩/分享」那一行，而且悬浮球要顶上来，
+  //    绝不能出现「插在一个看不见的容器里 + 悬浮球也收了」= 一个入口都没有。
+  await page.eval(
+    '(function(){document.querySelectorAll("#flexible-item-buttons").forEach(' +
+      'function(n){n.style.display="none"}); return true;})()'
+  );
+  const relocated = await waitFor(
+    page,
+    '(function(){var b=document.getElementById("v2t-page-entry");' +
+      'if(!b||!b.isConnected)return "";' +
+      'var r=b.getBoundingClientRect(); if(r.width<1||r.height<1)return "";' +
+      'return b.closest("#top-level-buttons-computed")?"topLevel":"";})()',
+    15000,
+    500
+  );
+  check('容器被折叠时入口改挂到可见的 #top-level-buttons-computed', relocated === 'topLevel',
+    '落点=' + (relocated || '(仍不可见)'));
+  // 关键不变量：任何时刻都至少有一个「看得见的」入口 ——
+  // 要么原生入口在，要么悬浮球在。绝不能两个都没了。
+  const anyEntry = await page.eval(
+    '(function(){var b=document.getElementById("v2t-page-entry");' +
+      'if(b&&b.isConnected){var r=b.getBoundingClientRect();' +
+      'if(r.width>1&&r.height>1&&getComputedStyle(b).visibility!=="hidden")return "native-entry";}' +
+      'var f=document.getElementById("v2t-fab");' +
+      'if(f&&getComputedStyle(f).display!=="none")return "fab";' +
+      'return "none";})()'
+  );
+  check('任何时刻都至少有一个可见入口（原生入口 或 悬浮球）', anyEntry !== 'none', '当前=' + anyEntry);
+
+  // 10. popup 的「检测本页」链路：SW → content script → 回传状态
+  try {
+    const list = await getJSON('http://127.0.0.1:' + CDP_PORT + '/json/list');
+    const swTarget = list.find((t) => t.url.indexOf('background.js') >= 0);
+    if (!swTarget) {
+      check('popup 自检链路（SW 转发 entry:status）', false, '没找到 SW 调试目标');
+    } else {
+      const sw = new CDP(swTarget.webSocketDebuggerUrl);
+      await sw.ready;
+      await sw.send('Runtime.enable');
+      const st = await sw.eval(
+        '(async function(){var tabs=await chrome.tabs.query({});' +
+          'var t=tabs.find(function(x){return /youtube\\.com/.test(x.url||"")});' +
+          'if(!t)return {error:"找不到 YouTube 标签页"};' +
+          'var r=await chrome.tabs.sendMessage(t.id,{target:"cs",type:"entry:status"});' +
+          'return r;})()',
+        15000
+      );
+      check('popup 自检链路（SW 转发 entry:status）', !!(st && st.supported && st.host),
+        JSON.stringify(st));
+      sw.close();
+    }
+  } catch (e) {
+    check('popup 自检链路（SW 转发 entry:status）', false, e.message);
+  }
+
   await finish();
 }
 

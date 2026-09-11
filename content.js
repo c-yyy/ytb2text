@@ -113,11 +113,14 @@
     inferStart: 0,
     audioDuration: 0,
     mountedAt: Date.now(),
+    // 录制有两种：'tab' 走 offscreen（标签页音频），'element' 走页面内 captureStream
+    recKind: null,
+    localRec: null,
   };
 
   /* ==================== DOM 骨架 ==================== */
 
-  var badge, body, mediaList, captionList, recPanel, recTimer, pagePanel;
+  var badge, body, mediaList, captionList, recPanel, recTimer, recTip, pagePanel;
   var progressCard, barFill, progressText, progressDetail;
   var resultCard, resultBox, resultMeta, fileInput, panel, fab, fabDot, srcHint;
   var modelSelect, langSelect, deviceSelect, mirrorSelect, translateChk, filterChk, modelHint;
@@ -135,17 +138,18 @@
     captionList = h('div', { class: 'v2t-list' });
     pagePanel = h('div', { class: 'v2t-sub-panel', hidden: true }, [mediaList, captionList]);
 
+    recTip = h('span', { class: 'v2t-rec-tip', text: '正在录制标签页声音，请保持视频播放' });
     recPanel = h('div', { class: 'v2t-sub-panel', hidden: true }, [
       h('div', { class: 'v2t-rec-row' }, [
         h('span', { class: 'v2t-rec-dot' }),
         recTimer,
-        h('span', { class: 'v2t-rec-tip', text: '正在录制标签页声音，请保持视频播放' }),
+        recTip,
       ]),
       h('button', {
         class: 'v2t-btn v2t-danger v2t-full',
         id: 'v2t-stop-rec',
         text: '停止并开始转录',
-        on: { click: stopRecordingAndTranscribe },
+        on: { click: stopCurrentRecording },
       }),
     ]);
 
@@ -602,8 +606,10 @@
 
       var rid = newRequestId();
       state.requestId = rid;
+      state.recKind = 'tab';
 
       recPanel.hidden = false;
+      recTip.textContent = '正在录制标签页声音，请保持视频播放';
       recTimer.textContent = '00:00';
       startRecTimer();
       setProgress('录制中…', '请让视频保持播放；完成后点「停止并开始转录」');
@@ -619,13 +625,24 @@
       if (!r || !r.ok) throw new Error((r && r.error) || '录制启动失败');
     } catch (e) {
       recPanel.hidden = true;
+      state.recKind = null;
       stopTimers();
       fail(String((e && e.message) || e));
     }
   }
 
+  /** 「停止并开始转录」按钮的唯一入口 —— 两种录制各自收尾 */
+  function stopCurrentRecording() {
+    if (state.recKind === 'element') {
+      if (state.localRec) state.localRec.stop();
+      return;
+    }
+    return stopRecordingAndTranscribe();
+  }
+
   async function stopRecordingAndTranscribe() {
     recPanel.hidden = true;
+    state.recKind = null;
     if (state.recTimerId) clearInterval(state.recTimerId);
     state.recTimerId = null;
     setBusy(true);
@@ -671,8 +688,12 @@
       var src = el.currentSrc || el.src || '';
       if (!src) continue;
       out.push({
+        el: el,
         tag: (el.tagName || '').toLowerCase(),
         src: src,
+        // http(s) = 能直接下载原始文件；blob: = MSE 边下边播的流，拿不到文件，
+        // 只能「边播边录」（见 startElementCapture）
+        mode: /^https?:/i.test(src) ? 'direct' : 'capture',
         duration: el.duration && isFinite(el.duration) ? el.duration : 0,
         title: el.getAttribute('title') || document.title,
       });
@@ -690,28 +711,31 @@
     captionList.textContent = '';
 
     var medias = scanMedia().filter(function (m) {
-      return /^https?:|^blob:/.test(m.src);
+      return /^https?:|^blob:/i.test(m.src);
     });
     if (!medias.length) {
       mediaList.appendChild(
         h('div', {
           class: 'v2t-empty',
-          text: '当前页面没有可直接抓取的 video/audio。这类站点（B站、腾讯视频等）请用「录制当前标签页」。',
+          text: '当前页面没有可直接抓取的 video/audio。加密流媒体（奈飞等）请用「录制当前标签页」。',
         })
       );
     }
     medias.forEach(function (m) {
       var name = (m.title || m.src).slice(0, 58);
+      var badges = [h('span', { class: 'v2t-kind', text: m.tag })];
+      if (m.mode === 'capture') badges.push(h('span', { class: 'v2t-kind', text: '流媒体' }));
       mediaList.appendChild(
         h('div', { class: 'v2t-item' }, [
-          h('span', { class: 'v2t-name' }, [
-            h('span', { class: 'v2t-kind', text: m.tag }),
-            name,
-          ]),
+          h('span', { class: 'v2t-name' }, badges.concat([name])),
           h('button', {
             class: 'v2t-mini',
-            text: '转录',
-            on: { click: function () { transcribeMedia(m); } },
+            text: m.mode === 'direct' ? '转录' : '边播边录',
+            title:
+              m.mode === 'direct'
+                ? '下载该媒体并转为文字'
+                : '这条是流媒体，拿不到原始文件，只能按播放速度实时录下声音',
+            on: { click: function () { handleMedia(m); } },
           }),
         ])
       );
@@ -745,37 +769,200 @@
     }
   }
 
-  async function transcribeMedia(m) {
+  async function handleMedia(m) {
     if (state.busy) return;
+    if (m.mode === 'capture') return startElementCapture(m, '');
+
     setBusy(true);
     setProgress('正在下载媒体…', m.src.slice(0, 90));
     setIndeterminate();
+
+    var buf;
     try {
-      if (!/^https?:/.test(m.src)) {
-        throw new Error('该媒体是 blob:/流媒体地址，浏览器无法直接取到原始文件，请改用「录制当前标签页」。');
+      buf = await downloadMedia(m);
+    } catch (e) {
+      if (e && e.cancelled) {
+        setBusy(false);
+        return;
       }
-      var head = await fetch(m.src, { method: 'HEAD', credentials: 'include' }).catch(function () {
-        return null;
-      });
-      var len = head && head.headers.get('content-length');
-      if (len && Number(len) > 600 * 1024 * 1024) {
-        var okBig = confirm(
-          '该视频约 ' + C.formatBytes(Number(len)) + '，下载与解码都比较慢。继续吗？'
-        );
-        if (!okBig) {
-          setBusy(false);
-          return;
-        }
-      }
-      var r = await fetch(m.src, { credentials: 'include' });
-      if (!r.ok) throw new Error('下载失败 HTTP ' + r.status);
-      var buf = await r.arrayBuffer();
+      // 下载不到原始文件（站点限制 / 需要登录 / 分片流）时不要给个死胡同，
+      // 直接退到「边播边录」把事办完
+      setBusy(false);
+      return startElementCapture(m, '无法直接下载（' + shortErr(e) + '），已改为边播边录：');
+    }
+
+    try {
       await submitAudioBuffer(buf, (m.title || 'page-media').slice(0, 60));
     } catch (e) {
-      fail(
-        String((e && e.message) || e) +
-          '（若站点限制了下载，请改用「录制当前标签页」）'
-      );
+      fail(String((e && e.message) || e));
+    }
+  }
+
+  function shortErr(e) {
+    var s = String((e && e.message) || e || '未知原因');
+    return s.length > 40 ? s.slice(0, 40) + '…' : s;
+  }
+
+  async function downloadMedia(m) {
+    var head = await fetch(m.src, { method: 'HEAD', credentials: 'include' }).catch(function () {
+      return null;
+    });
+    var len = head && head.headers.get('content-length');
+    if (len && Number(len) > 600 * 1024 * 1024) {
+      if (!confirm('该视频约 ' + C.formatBytes(Number(len)) + '，下载与解码都比较慢。继续吗？')) {
+        var c = new Error('用户取消');
+        c.cancelled = true;
+        throw c;
+      }
+    }
+    var r = await fetch(m.src, { credentials: 'include' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.arrayBuffer();
+  }
+
+  function pickRecMime() {
+    if (typeof MediaRecorder === 'undefined') return null;
+    var cands = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+    for (var i = 0; i < cands.length; i++) {
+      try {
+        if (MediaRecorder.isTypeSupported(cands[i])) return cands[i];
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 从播放器元素本身抓音频（HTMLMediaElement.captureStream）。
+   *
+   * 为什么需要它：YouTube / B站 / 腾讯视频这类站点用 MSE 边下边播，
+   * video.src 是个 blob: 地址，fetch 拿不到原始文件 —— 但音响里的声音是有的，
+   * captureStream 就能把它接出来，不需要 tabCapture 权限、也不会录进别的标签页声音。
+   * 代价是只能按播放速度实时录（MSE 的物理限制，没有更快的办法）。
+   */
+  async function startElementCapture(m, note) {
+    if (state.busy) return;
+    var el = m && m.el;
+    if (!el || !el.isConnected) {
+      fail('这个播放器已经不在页面上了，请重新选择。');
+      return;
+    }
+    if (typeof el.captureStream !== 'function') {
+      fail('这条媒体是流媒体（拿不到原始文件），当前浏览器又不支持直接从播放器捕获音频，请改用「录制当前标签页」。');
+      return;
+    }
+
+    setBusy(true);
+    setProgress('正在从播放器捕获音频…', note || '');
+    setIndeterminate();
+
+    // 暂停状态下捕获不到音频数据，先让它播起来（点击属于用户手势，play() 不会被拦）
+    try {
+      if (el.paused) await el.play();
+    } catch (e) {
+      /* 下面音轨为空时会给出更明确的提示 */
+    }
+
+    var audioTracks;
+    try {
+      audioTracks = el.captureStream().getAudioTracks();
+    } catch (e) {
+      fail('无法从播放器捕获音频：' + shortErr(e) + '。请改用「录制当前标签页」。');
+      return;
+    }
+    if (!audioTracks.length) {
+      fail('这个播放器没有可捕获的音轨（可能还没开始播放，或内容受保护）。请改用「录制当前标签页」。');
+      return;
+    }
+
+    var mime = pickRecMime();
+    var rec;
+    try {
+      rec = new MediaRecorder(new MediaStream(audioTracks), mime ? { mimeType: mime } : undefined);
+    } catch (e) {
+      fail('无法启动录制：' + shortErr(e) + '。请改用「录制当前标签页」。');
+      return;
+    }
+
+    var chunks = [];
+    var finished = false;
+    var maxMs = (C.DEFAULT_SETTINGS.maxRecordSeconds || 900) * 1000;
+
+    function cleanup() {
+      clearTimeout(hardTimer);
+      try {
+        el.removeEventListener('ended', onEnded);
+      } catch (e) {
+        /* ignore */
+      }
+      recPanel.hidden = true;
+      state.localRec = null;
+      state.recKind = null;
+      stopTimers();
+    }
+
+    function onEnded() {
+      if (!finished) stopCurrentRecording();
+    }
+
+    var hardTimer = setTimeout(function () {
+      if (!finished) stopCurrentRecording();
+    }, maxMs);
+
+    rec.ondataavailable = function (e) {
+      if (e.data && e.data.size) chunks.push(e.data);
+    };
+
+    rec.onerror = function (e) {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      fail('录制出错：' + shortErr((e && e.error) || e));
+    };
+
+    rec.onstop = async function () {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      setProgress('正在解码录音…', '');
+      setIndeterminate();
+      try {
+        var blob = new Blob(chunks, { type: mime || 'audio/webm' });
+        if (!blob.size) throw new Error('没有录到音频（视频可能一直没在播放）');
+        var buf = await blob.arrayBuffer();
+        await submitAudioBuffer(buf, (m.title || 'page-media').slice(0, 60) + '（边播边录）');
+      } catch (e) {
+        fail(String((e && e.message) || e));
+      }
+    };
+
+    state.recKind = 'element';
+    state.localRec = {
+      stop: function () {
+        try {
+          if (rec.state !== 'inactive') rec.stop();
+        } catch (e) {
+          /* ignore */
+        }
+      },
+    };
+
+    recPanel.hidden = false;
+    recTip.textContent = '正在边播边录这条视频的声音（实时速度，请保持播放）';
+    if (note) srcHint.textContent = note;
+    recTimer.textContent = '00:00';
+    startRecTimer();
+    setProgress('边播边录中…', '按播放速度实时录制；完成后点「停止并开始转录」');
+    setIndeterminate();
+
+    el.addEventListener('ended', onEnded, { once: true });
+
+    try {
+      rec.start(1000); // 每秒落一片数据，中途出错也能保住已录到的部分
+    } catch (e) {
+      cleanup();
+      fail('无法开始录制：' + shortErr(e));
     }
   }
 
@@ -944,13 +1131,17 @@
     }
   }
 
-  chrome.runtime.onMessage.addListener(function (msg) {
+  chrome.runtime.onMessage.addListener(function (msg, sender, respond) {
     if (!msg) return undefined;
 
     // SW 补注入后要求打开面板
     if (msg.target === 'cs') {
       if (msg.type === 'panel:toggle') setPanelOpen(panel.hidden);
       else if (msg.type === 'panel:open') setPanelOpen(true);
+      else if (msg.type === 'entry:status') {
+        respond(entryStatus());
+        return true;
+      }
       return undefined;
     }
 
@@ -1002,18 +1193,51 @@
 
   var ENTRY_ID = 'v2t-page-entry';
 
+  // 「真的看得见吗」—— 有尺寸 + 未被 display:none / visibility:hidden 藏掉。
+  // YouTube 会把整组按钮折叠进「⋮」菜单，容器还在 DOM 里但尺寸为 0：
+  // 那时把入口插进去等于没插，必须能识别出来。
+  function visibleBox(el) {
+    if (!el || !el.isConnected) return null;
+    var r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return null;
+    var st = window.getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden') return null;
+    return r;
+  }
+
+  // 容器里至少得有一个看得见的原生按钮，才算「这一行是展开的」
+  function hasVisibleButton(box) {
+    var btns = box.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      if (visibleBox(btns[i])) return true;
+    }
+    return false;
+  }
+
   var ENTRY_SITES = [
     {
       name: 'youtube',
       match: /(^|\.)(youtube\.com|youtube-nocookie\.com)$/i,
-      // 必须限定在观看页里找，否则首页/侧栏的预览菜单也会被插进去
+      // 必须限定在观看页里找，否则首页/侧栏的预览菜单也会被插进去。
+      // 候选按「离原生操作栏多近」排序，返回**第一个真正展开可见**的那个 ——
+      // 窗口窄时 YouTube 会把 #flexible-item-buttons 收进 ⋮ 菜单，
+      // 此时退到 #top-level-buttons-computed（赞/踩/分享那一行）。
       anchor: function () {
         if (!document.querySelector('ytd-watch-flexy')) return null;
-        return (
-          document.querySelector('ytd-watch-metadata #flexible-item-buttons') ||
-          document.querySelector('#above-the-fold #flexible-item-buttons') ||
-          document.querySelector('ytd-watch-flexy #top-level-buttons-computed')
-        );
+        var cands = [
+          document.querySelector('ytd-watch-metadata #flexible-item-buttons'),
+          document.querySelector('#above-the-fold #flexible-item-buttons'),
+          document.querySelector('ytd-watch-metadata #top-level-buttons-computed'),
+          document.querySelector('ytd-watch-flexy #top-level-buttons-computed'),
+        ];
+        for (var i = 0; i < cands.length; i++) {
+          var c = cands[i];
+          if (!c) continue;
+          if (!visibleBox(c)) continue;
+          if (!hasVisibleButton(c)) continue;
+          return c;
+        }
+        return null;
       },
     },
   ];
@@ -1117,48 +1341,91 @@
     var site = entrySite();
     var ok = false;
 
-    if (site) {
-      var anchor = site.anchor();
-      if (anchor) {
-        var node = document.getElementById(ENTRY_ID);
-        if (node && node.isConnected) {
-          ok = true;
-          // 自愈：首次注入时原生按钮可能还没渲染完，皮肤没抄到就会退化成兜底样式。
-          // 现在能拿到捐赠者了，就重建一次换上原生外观。
-          if (node.classList.contains('v2t-entry-plain') && donorNear(anchor)) {
-            node.parentNode.removeChild(node);
-            anchor.appendChild(buildEntry(anchor));
-          }
-        } else {
-          try {
-            anchor.appendChild(buildEntry(anchor));
-            ok = !!document.getElementById(ENTRY_ID);
-          } catch (err) {
-            ok = false;
-          }
+    // anchor() 只会返回「真正展开可见」的容器，所以拿不到就说明现在没有能挂的位置
+    var anchor = site ? site.anchor() : null;
+
+    if (anchor) {
+      var node = document.getElementById(ENTRY_ID);
+      var stale = !!(node && node.isConnected) && !visibleBox(node);
+      if (stale) {
+        // 之前挂在了后来被折叠/隐藏的容器里，清掉重挂
+        node.parentNode.removeChild(node);
+        node = null;
+      }
+      if (node && node.isConnected) {
+        // 自愈：首次注入时原生按钮可能还没渲染完，皮肤没抄到就退化成兜底样式。
+        // 现在能拿到捐赠者了，就重建一次换上原生外观。
+        if (node.classList.contains('v2t-entry-plain') && donorNear(anchor)) {
+          node.parentNode.removeChild(node);
+          node = null;
+        }
+      }
+      if (node && node.isConnected) {
+        ok = true;
+      } else {
+        try {
+          anchor.appendChild(buildEntry(anchor));
+          var fresh = document.getElementById(ENTRY_ID);
+          ok = !!visibleBox(fresh);
+          if (!ok && fresh && fresh.parentNode) fresh.parentNode.removeChild(fresh);
+        } catch (err) {
+          ok = false;
         }
       }
     }
 
-    // 有原生入口就把右下角那颗球收起来 —— 否则同一个功能出现两个入口，
-    // 而且悬浮球会一直挡在画面上
+    // 只有「原生入口确实看得见」才收起右下角的悬浮球 ——
+    // 否则用户会一个入口都找不到（这正是把按钮插进被折叠容器时的坑）
     if (fab) fab.hidden = ok;
     return ok;
+  }
+
+  // 「现在这个入口是好的吗」—— 节点在、可见、而且是原生外观
+  function entryHealthy() {
+    var node = document.getElementById(ENTRY_ID);
+    return !!(node && node.isConnected && !node.classList.contains('v2t-entry-plain') && visibleBox(node));
+  }
+
+  // 给 popup 看的自检结果：入口没显示出来时，一眼能看出卡在哪一步
+  function entryStatus() {
+    var site = entrySite();
+    var anchor = site ? site.anchor() : null;
+    var node = document.getElementById(ENTRY_ID);
+    var anyVisible = function (sel) {
+      var list = document.querySelectorAll(sel);
+      for (var i = 0; i < list.length; i++) {
+        if (visibleBox(list[i]) && hasVisibleButton(list[i])) return true;
+      }
+      return false;
+    };
+    return {
+      host: location.hostname,
+      supported: !!site,
+      siteName: site ? site.name : null,
+      anchorFound: !!anchor,
+      anchorId: anchor ? anchor.id || anchor.tagName.toLowerCase() : null,
+      mounted: !!(node && node.isConnected),
+      visible: !!(node && visibleBox(node)),
+      plainSkin: !!(node && node.classList.contains('v2t-entry-plain')),
+      flexTotal: document.querySelectorAll('#flexible-item-buttons').length,
+      flexVisible: anyVisible('#flexible-item-buttons'),
+      topVisible: anyVisible('#top-level-buttons-computed'),
+      fabVisible: !!(fab && !fab.hidden),
+    };
   }
 
   function watchEntry() {
     syncEntry();
 
     // YouTube 是 SPA：路由切换、局部重渲染都会把我们的节点冲掉，得反复补挂。
-    // 开销控制：只有在「节点不在了」或「还是兜底样式」的时候才做完整同步。
+    // 开销控制：只有在「节点不在了 / 又变回兜底样式 / 被藏起来了」才做完整同步。
     var queued = false;
     function schedule() {
       if (queued) return;
       queued = true;
       setTimeout(function () {
         queued = false;
-        var node = document.getElementById(ENTRY_ID);
-        if (node && node.isConnected && !node.classList.contains('v2t-entry-plain')) return;
+        if (entryHealthy()) return;
         syncEntry();
       }, 300);
     }
@@ -1169,9 +1436,28 @@
       }
     }).observe(document.documentElement, { childList: true, subtree: true });
 
-    ['yt-navigate-finish', 'yt-page-data-updated', 'popstate'].forEach(function (ev) {
+    ['yt-navigate-finish', 'yt-page-data-updated', 'popstate', 'resize'].forEach(function (ev) {
       window.addEventListener(ev, schedule, true);
     });
+
+    // 兜底轮询：容器被折叠、站点改样式这类变化**不产生 childList 变动**，
+    // MutationObserver 等不到（而入口正好会因此变得不可见）。
+    // 前 30 秒每秒看一次（覆盖首屏渲染），之后降到每 4 秒一次；
+    // 一次检查的成本只有 getElementById + 一次测量，可以忽略。
+    var tries = 0;
+    var poll = setInterval(function () {
+      tries++;
+      if (tries === 30) {
+        clearInterval(poll);
+        poll = setInterval(tick, 4000);
+      }
+      tick();
+    }, 1000);
+
+    function tick() {
+      if (entryHealthy()) return;
+      syncEntry();
+    }
   }
 
   /* ==================== 启动 ==================== */

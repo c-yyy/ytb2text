@@ -168,3 +168,47 @@ button.primary:active {
   border: 2px solid #b91c1c;
   border-radius: 7px;
 }
+
+/* 本页入口检测的结果：等宽 + 保留换行，逐条列出「哪一步过了」 */
+.diag {
+  margin: 0 0 7px;
+  padding: 8px 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: #f4f4f7;
+  border: 2px solid var(--ink);
+  border-radius: 7px;
+}
+
+button.ghost {
+  width: 100%;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 7px;
+  cursor: pointer;
+  box-shadow: 3px 3px 0 var(--ink);
+  transition: background 0.12s, transform 0.08s, box-shadow 0.08s;
+}
+
+button.ghost:hover {
+  background: #eef2ff;
+  color: var(--accent-dark);
+}
+
+button.ghost:active {
+  transform: translate(1px, 1px);
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

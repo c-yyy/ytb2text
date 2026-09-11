@@ -96,14 +96,14 @@ const CS_FILES = ['lib/constants.js', 'lib/audio.js', 'lib/export.js', 'content.
  */
 async function sendToPanel(tabId, message) {
   try {
-    await chrome.tabs.sendMessage(tabId, message);
-    return { ok: true };
+    const res = await chrome.tabs.sendMessage(tabId, message);
+    return { ok: true, res };
   } catch (e) {
     try {
       await chrome.scripting.insertCSS({ target: { tabId }, files: ['content.css'] });
       await chrome.scripting.executeScript({ target: { tabId }, files: CS_FILES });
-      await chrome.tabs.sendMessage(tabId, message);
-      return { ok: true, injected: true };
+      const res = await chrome.tabs.sendMessage(tabId, message);
+      return { ok: true, injected: true, res };
     } catch (e2) {
       throw new Error('无法在该页面注入面板（chrome:// 等受限页面不支持）：' + (e2.message || e2));
     }
@@ -161,6 +161,18 @@ async function handleSW(type, payload) {
       if (tabId == null) throw new Error('找不到当前标签页');
       const r = await sendToPanel(tabId, { target: 'cs', type: 'panel:open' });
       return Object.assign({ tabId }, r);
+    }
+
+    // 页面里「原生入口」到底挂上没有 —— 面板不显示时用它定位卡在哪一步
+    case 'panel:status': {
+      let tabId = payload.tabId;
+      if (tabId == null) {
+        const tab = await getActiveTab();
+        tabId = tab && tab.id;
+      }
+      if (tabId == null) throw new Error('找不到当前标签页');
+      const r = await sendToPanel(tabId, { target: 'cs', type: 'entry:status' });
+      return Object.assign({ tabId, status: r && r.res }, r);
     }
 
     case 'offscreen:ensure':
