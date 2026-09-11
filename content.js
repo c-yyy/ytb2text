@@ -27,6 +27,9 @@
   // 与 offscreen.js 的 MAX_CHUNK_FLOATS 必须一致（改一处就要改两处）
   var MAX_CHUNK_FLOATS = 4 * 1024 * 1024;
 
+  // 只在这些站点去探测页面自带字幕轨（其余站点探测是纯浪费）
+  var MAY_HAVE_CAPTIONS = /(^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be)$/i;
+
   /* ==================== 小工具 ==================== */
 
   function h(tag, props, kids) {
@@ -714,7 +717,11 @@
       );
     });
 
-    // 页面自带字幕（YouTube 等）：能取就别跑模型，快 100 倍且 100% 准确
+    // 页面自带字幕（YouTube 等）：能取就别跑模型，快 100 倍且 100% 准确。
+    // 只在可能带字幕的站点去问 —— 每问一次都要往 MAIN world 注入一次脚本，
+    // 在所有站点上无脑探测既浪费、也容易在严格 CSP 的站上刷报错。
+    if (!MAY_HAVE_CAPTIONS.test(location.hostname)) return;
+
     try {
       var res = await callSW('page:captions', {});
       var tracks = (res && res.tracks) || [];
@@ -868,9 +875,11 @@
     setBusy(true);
     setProgress('正在加载模型…', '');
     setIndeterminate();
+    // 用新的 requestId 并写回 state，否则进度广播会被 requestId 过滤器挡掉
+    state.requestId = newRequestId();
     try {
       var res = await callOffscreen('asr:preload', {
-        requestId: state.requestId || newRequestId(),
+        requestId: state.requestId,
         options: getSettings(),
       });
       if (!res || !res.ok) throw new Error((res && res.error) || '预加载失败');

@@ -228,6 +228,20 @@ async function main() {
   const page = new CDP(created.webSocketDebuggerUrl);
   await page.ready;
   await page.send('Runtime.enable');
+  await page.send('Page.enable');
+
+  // 截图工具：顺便产出 README 用的图，也方便肉眼验收 UI
+  const shotDir = path.join(ROOT, 'screenshots');
+  fs.mkdirSync(shotDir, { recursive: true });
+  async function shot(name) {
+    try {
+      const r = await page.send('Page.captureScreenshot', { format: 'png' }, 30000);
+      fs.writeFileSync(path.join(shotDir, name), Buffer.from(r.data, 'base64'));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
 
   let injected = false;
   for (let i = 0; i < 30; i++) {
@@ -284,6 +298,16 @@ async function main() {
         "document.getElementById('v2t-root').querySelector('.v2t-fab-dot').classList.contains('show')"
       )
     );
+
+    const shotted = await shot('panel-overview.png');
+    check('截图产出 screenshots/panel-overview.png', shotted);
+
+    // 点一下「页面内视频」，让面板载入媒体列表，截一张有内容的图
+    await page.eval(
+      "(function(){ var b = document.getElementById('v2t-root').querySelector('.v2t-src[data-src=page]'); if (b) b.click(); return true; })()"
+    );
+    await sleep(900);
+    await shot('panel-page-video.png');
 
     // 再点一次应该收起
     await page.eval("document.getElementById('v2t-root').querySelector('.v2t-fab').click(); true");

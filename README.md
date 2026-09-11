@@ -9,6 +9,21 @@ UI 与项目结构对标 [Bili-Mux（哔哩喵）](https://github.com/c-yyy/bili
 
 ---
 
+## 界面预览
+
+右下角悬浮按钮 → 页内卡片面板，三条音频链路都在同一个面板里完成：
+
+![面板总览](screenshots/panel-overview.png)
+
+选「页面内视频」会列出当前页里的媒体，可以挑一条直接转：
+
+![页面内视频](screenshots/panel-page-video.png)
+
+> 两张图由 `npm run smoke` 在真实 Chrome 里加载本扩展后自动截取，
+> 页面是测试用的冒烟页，不是为了截图另外做的 demo。
+
+---
+
 ## 快速开始
 
 ```bash
@@ -62,6 +77,7 @@ ytb2text/
 │   ├── export.js              # TXT / SRT / VTT 格式化与下载
 │   └── transformers/          # vendored 运行时（约 32MB，随仓库提交）
 ├── icons/
+├── screenshots/               # 冒烟测试自动产出的界面截图（README 用）
 ├── tools/
 │   ├── vendor.js              # 从 node_modules 抽运行时到 lib/
 │   ├── selfcheck.js           # 静态自检：文件引用 / 样式类名 / 常量一致性
