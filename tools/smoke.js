@@ -39,82 +39,11 @@ const CHROME_CANDIDATES = [
   '/usr/bin/chromium',
 ];
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { CDP, sleep, getJSON } = require('./cdp');
 
 function findChrome() {
   for (const c of CHROME_CANDIDATES) if (c && fs.existsSync(c)) return c;
   return null;
-}
-
-function getJSON(url) {
-  return fetch(url).then((r) => r.json());
-}
-
-/* ---------------- 极简 CDP 客户端 ---------------- */
-
-class CDP {
-  constructor(wsUrl) {
-    this.ws = new WebSocket(wsUrl);
-    this.nextId = 1;
-    this.pending = new Map();
-    this.ready = new Promise((resolve, reject) => {
-      this.ws.addEventListener('open', () => resolve());
-      this.ws.addEventListener('error', () => reject(new Error('CDP 连接失败')));
-    });
-    this.ws.addEventListener('message', (ev) => {
-      let msg;
-      try {
-        msg = JSON.parse(ev.data);
-      } catch (e) {
-        return;
-      }
-      if (msg.id && this.pending.has(msg.id)) {
-        const p = this.pending.get(msg.id);
-        this.pending.delete(msg.id);
-        clearTimeout(p.timer);
-        if (msg.error) p.reject(new Error(msg.error.message));
-        else p.resolve(msg.result);
-      }
-    });
-  }
-
-  send(method, params, timeoutMs) {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new Error('CDP 超时：' + method));
-        }
-      }, timeoutMs || 60000);
-      this.pending.set(id, { resolve, reject, timer });
-      this.ws.send(JSON.stringify({ id, method, params: params || {} }));
-    });
-  }
-
-  async eval(expression, timeoutMs) {
-    const r = await this.send(
-      'Runtime.evaluate',
-      { expression, awaitPromise: true, returnByValue: true, userGesture: true },
-      timeoutMs
-    );
-    if (r.exceptionDetails) {
-      const d =
-        r.exceptionDetails.exception && r.exceptionDetails.exception.description
-          ? r.exceptionDetails.exception.description
-          : JSON.stringify(r.exceptionDetails);
-      throw new Error('页面内表达式抛错：' + d);
-    }
-    return r.result && r.result.value;
-  }
-
-  close() {
-    try {
-      this.ws.close();
-    } catch (e) {
-      /* ignore */
-    }
-  }
 }
 
 /* ---------------- 测试页 ---------------- */

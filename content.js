@@ -988,10 +988,197 @@
     return undefined;
   });
 
+  /* ==================== 页面原生入口 ==================== */
+  //
+  // 有些站点（YouTube 观看页）自带一条操作栏。把入口做成其中一个按钮，
+  // 比在右下角浮一颗球自然得多，也不会挡住画面。
+  //
+  // 做法是**运行时从原生按钮上抄 class 名**，再用普通 DOM 拼一个自己的按钮：
+  //   · 抄 class  → 自动跟随站点的配色、尺寸、圆角、暗色主题，改版也不怕
+  //   · 只拼普通 DOM → 千万不要 cloneNode 原生按钮，那结构里有自定义元素，
+  //     插进文档会被 upgrade 并重新渲染，把我们塞进去的内容冲掉
+  // 图标用内联描边（原生容器会把 fill 设成 currentcolor，
+  // 线条类路径是零面积的，不改回 stroke 就什么都不显示）。
+
+  var ENTRY_ID = 'v2t-page-entry';
+
+  var ENTRY_SITES = [
+    {
+      name: 'youtube',
+      match: /(^|\.)(youtube\.com|youtube-nocookie\.com)$/i,
+      // 必须限定在观看页里找，否则首页/侧栏的预览菜单也会被插进去
+      anchor: function () {
+        if (!document.querySelector('ytd-watch-flexy')) return null;
+        return (
+          document.querySelector('ytd-watch-metadata #flexible-item-buttons') ||
+          document.querySelector('#above-the-fold #flexible-item-buttons') ||
+          document.querySelector('ytd-watch-flexy #top-level-buttons-computed')
+        );
+      },
+    },
+  ];
+
+  // 找「捐赠者」：抄 class 用的原生按钮。
+  // 关键是**只在插入位置所在的那一行里找** —— YouTube 会把同一段元数据在 DOM 里
+  // 渲染好几份（其中靠前的几份是空占位模板），全局 querySelector 很容易抓到空壳，
+  // 抄不到 class 就只能退化成兜底样式。
+  function donorNear(anchor) {
+    var row = anchor.closest('ytd-menu-renderer') || anchor.parentElement;
+    if (!row) return null;
+    var btns = row.querySelectorAll('button[aria-label]');
+    var withIcon = null;
+    var withText = null;
+    for (var i = 0; i < btns.length; i++) {
+      if (!btns[i].querySelector('svg')) continue;
+      if (!withIcon) withIcon = btns[i];
+      // 一直覆盖 → 最终拿到「最后一个有文字」的按钮（分享 / 保存 / 下载那一类），
+      // 它的结构（图标 + 文字）和我们做的按钮最贴合
+      if (btns[i].textContent.trim()) withText = btns[i];
+    }
+    return withText || withIcon || btns[0] || null;
+  }
+
+  function entrySite() {
+    for (var i = 0; i < ENTRY_SITES.length; i++) {
+      if (ENTRY_SITES[i].match.test(location.hostname)) return ENTRY_SITES[i];
+    }
+    return null;
+  }
+
+  // 从原生按钮上读出三处 class：按钮本体 / 图标容器 / 文字容器
+  function readSkin(donor) {
+    if (!donor) return null;
+    var box = donor.querySelector('[aria-hidden="true"]');
+    var wrap = box && box.firstElementChild;
+    var shape = wrap && wrap.firstElementChild;
+    var text = null;
+    for (var i = 0; i < donor.children.length; i++) {
+      var c = donor.children[i];
+      if (c !== box && c.tagName === 'DIV') { text = c; break; }
+    }
+    return {
+      btn: donor.className || '',
+      box: box ? box.className : '',
+      wrap: wrap ? wrap.className : '',
+      shape: shape ? shape.className : '',
+      text: text ? text.className : '',
+    };
+  }
+
+  // 描边图标（原生容器的 fill: currentcolor 会让零面积的线条路径消失，所以内联写死 stroke）
+  function strokeIcon() {
+    var NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('focusable', 'false');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.style.cssText =
+      'display:block;width:100%;height:100%;pointer-events:none;fill:none;' +
+      'stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round';
+    var p = document.createElementNS(NS, 'path');
+    // 一张折角文稿 + 两条文字线
+    p.setAttribute('d', 'M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6');
+    svg.appendChild(p);
+    return svg;
+  }
+
+  function onEntryClick(e) {
+    // 原生操作栏里按钮的父级还可能挂着别的行为，这里必须掐断冒泡
+    e.preventDefault();
+    e.stopPropagation();
+    setPanelOpen(panel.hidden);
+  }
+
+  function buildEntry(anchor) {
+    var skin = readSkin(donorNear(anchor));
+    var icon = strokeIcon();
+
+    var inner = h('div', { style: 'width:100%;height:100%;display:block' }, [icon]);
+    var shape = h('span', { class: skin ? skin.shape : '' }, [inner]);
+    var wrap = h('span', { class: skin ? skin.wrap : '', style: 'width:24px;height:24px' }, [shape]);
+    var iconBox = h('div', { class: skin ? skin.box : '', 'aria-hidden': 'true' }, [wrap]);
+    var textBox = h('div', { class: skin ? skin.text : '', text: '转文字' });
+
+    return h(
+      'button',
+      {
+        id: ENTRY_ID,
+        type: 'button',
+        class: (skin ? skin.btn + ' ' : '') + 'v2t-entry' + (skin ? '' : ' v2t-entry-plain'),
+        title: '视频转文字（本地 Whisper）',
+        'aria-label': '视频转文字（本地 Whisper）',
+        on: { click: onEntryClick },
+      },
+      [iconBox, textBox]
+    );
+  }
+
+  function syncEntry() {
+    var site = entrySite();
+    var ok = false;
+
+    if (site) {
+      var anchor = site.anchor();
+      if (anchor) {
+        var node = document.getElementById(ENTRY_ID);
+        if (node && node.isConnected) {
+          ok = true;
+          // 自愈：首次注入时原生按钮可能还没渲染完，皮肤没抄到就会退化成兜底样式。
+          // 现在能拿到捐赠者了，就重建一次换上原生外观。
+          if (node.classList.contains('v2t-entry-plain') && donorNear(anchor)) {
+            node.parentNode.removeChild(node);
+            anchor.appendChild(buildEntry(anchor));
+          }
+        } else {
+          try {
+            anchor.appendChild(buildEntry(anchor));
+            ok = !!document.getElementById(ENTRY_ID);
+          } catch (err) {
+            ok = false;
+          }
+        }
+      }
+    }
+
+    // 有原生入口就把右下角那颗球收起来 —— 否则同一个功能出现两个入口，
+    // 而且悬浮球会一直挡在画面上
+    if (fab) fab.hidden = ok;
+    return ok;
+  }
+
+  function watchEntry() {
+    syncEntry();
+
+    // YouTube 是 SPA：路由切换、局部重渲染都会把我们的节点冲掉，得反复补挂。
+    // 开销控制：只有在「节点不在了」或「还是兜底样式」的时候才做完整同步。
+    var queued = false;
+    function schedule() {
+      if (queued) return;
+      queued = true;
+      setTimeout(function () {
+        queued = false;
+        var node = document.getElementById(ENTRY_ID);
+        if (node && node.isConnected && !node.classList.contains('v2t-entry-plain')) return;
+        syncEntry();
+      }, 300);
+    }
+
+    new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        if (muts[i].addedNodes.length || muts[i].removedNodes.length) return schedule();
+      }
+    }).observe(document.documentElement, { childList: true, subtree: true });
+
+    ['yt-navigate-finish', 'yt-page-data-updated', 'popstate'].forEach(function (ev) {
+      window.addEventListener(ev, schedule, true);
+    });
+  }
+
   /* ==================== 启动 ==================== */
 
   (async function init() {
     buildUI();
+    watchEntry();
 
     try {
       var stored = await chrome.storage.local.get(['v2t_settings', 'v2t_last', 'v2t_panel_open']);

@@ -115,6 +115,12 @@
   display: block;
 }
 
+/* 站点自带操作栏里已经挂了入口时，把这颗球收起来
+   （.v2t-fab 的 display:flex 会盖掉浏览器默认的 [hidden]{display:none}，必须显式写） */
+#v2t-root .v2t-fab[hidden] {
+  display: none;
+}
+
 /* ==================== 面板外框 ==================== */
 
 #v2t-root .v2t-panel {
@@ -655,4 +661,43 @@
   #v2t-root .v2t-panel {
     width: calc(100vw - 20px);
   }
+}
+
+/* ==================== 站点原生操作栏里的入口 ====================
+   这个按钮挂在页面（不是 #v2t-root）里，所以不套上面那套重置。
+   正常情况下它的 class 是运行时从原生按钮抄来的，本站样式就够看了；
+   下面只兜底「抄不到 class」的情况，以及几条不跟原生样式打架的必要属性。 */
+
+#v2t-page-entry {
+  cursor: pointer;
+  /* 原生按钮常常带 tooltip/菜单的定位上下文，别被我们的样式改掉 */
+  position: relative;
+}
+
+#v2t-page-entry svg {
+  pointer-events: none;
+}
+
+/* 兜底外观：抄 class 失败时至少还是颗像样的药丸按钮 */
+#v2t-page-entry.v2t-entry-plain {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.05);
+  color: inherit;
+  font: 500 14px/1 Roboto, "YouTube Sans", system-ui, -apple-system, sans-serif;
+}
+
+#v2t-page-entry.v2t-entry-plain:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+#v2t-page-entry.v2t-entry-plain > div[aria-hidden='true'] {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
 }

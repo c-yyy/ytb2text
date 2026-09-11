@@ -102,6 +102,11 @@ if (exists('content.js') && exists('content.css')) {
       if (c.indexOf('v2t-') === 0) used.add(c);
     });
   }
+  // 拼接写法的 class：' ' + ' v2t-xxx'（注意不要拿 '#v2t-root' 这类选择器误判）
+  const re1b = /['"]\s+(v2t-[a-z0-9-]+)['"]/g;
+  while ((m = re1b.exec(js))) {
+    used.add(m[1]);
+  }
   // 抓 classList.add/toggle('x') 与 querySelector('.x')
   const re2 = /classList\.(?:add|toggle|remove)\('([^']+)'/g;
   while ((m = re2.exec(js))) {
@@ -115,12 +120,14 @@ if (exists('content.js') && exists('content.css')) {
   if (missing.length) fail('content.css 里缺少这些 class 的定义：' + missing.join(', '));
 
   // 反向：CSS 里定义但 JS 完全没用的 class（只提示，不算错）
+  // 这几个是刻意留下的设计系统变体，不参与业务逻辑，别报成噪音。
+  const INTENTIONAL = new Set(['v2t-primary']);
   const cssClasses = new Set();
   const re3 = /\.(v2t-[a-z0-9-]+)/g;
   while ((m = re3.exec(css))) cssClasses.add(m[1]);
   const unused = [];
   cssClasses.forEach((c) => {
-    if (!used.has(c)) unused.push(c);
+    if (!used.has(c) && !INTENTIONAL.has(c)) unused.push(c);
   });
   if (unused.length) notes.push('content.css 中未被 content.js 直接引用的 class（可能是状态类或子元素，供人工确认）：' + unused.join(', '));
 }

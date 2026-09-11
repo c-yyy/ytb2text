@@ -8,7 +8,9 @@
     "check": "node tools/selfcheck.js",
     "smoke": "node tools/smoke.js",
     "smoke:full": "node tools/smoke.js --with-inference",
+    "yt": "node tools/youtube-check.js",
     "verify": "node tools/selfcheck.js && node tools/smoke.js",
+    "verify:all": "node tools/selfcheck.js && node tools/smoke.js && node tools/youtube-check.js",
     "pack": "bash tools/pack.sh",
     "zip": "bash tools/zip.sh"
   },

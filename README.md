@@ -4,14 +4,19 @@
 音频不出本机、不需要 API Key、**运行过程 0 调用成本**。
 
 UI 与项目结构对标 [Bili-Mux（哔哩喵）](https://github.com/c-yyy/bili-mux) 的做法：
-**无构建**（纯 JS 平铺根目录）、**页面内注入面板**（右下角悬浮按钮 → 页内卡片）、
-**Offscreen Document 干重活**。
+**无构建**（纯 JS 平铺根目录）、**页面内注入面板**、**Offscreen Document 干重活**。
+入口优先插进站点自带的操作栏（YouTube 观看页等），没有可挂的地方才退回右下角悬浮按钮。
 
 ---
 
 ## 界面预览
 
-右下角悬浮按钮 → 页内卡片面板，三条音频链路都在同一个面板里完成：
+在 YouTube 观看页，入口会**长在它自己的操作栏里**（「分享」右边），和原生按钮同款外观，
+点了就地弹出面板 —— 不再往画面上浮一颗球：
+
+![YouTube 操作栏里的入口](screenshots/youtube-entry.png)
+
+其它站点没有这样的操作栏可挂，就退回右下角悬浮按钮 → 页内卡片面板：
 
 ![面板总览](screenshots/panel-overview.png)
 
@@ -19,8 +24,45 @@ UI 与项目结构对标 [Bili-Mux（哔哩喵）](https://github.com/c-yyy/bili
 
 ![页面内视频](screenshots/panel-page-video.png)
 
-> 两张图由 `npm run smoke` 在真实 Chrome 里加载本扩展后自动截取，
-> 页面是测试用的冒烟页，不是为了截图另外做的 demo。
+> 后两张由 `npm run smoke` 自动截取（页面是测试用的冒烟页）；
+> 第一张由 `npm run yt` 在**真实的 YouTube 观看页**上截取。
+
+---
+
+## 入口是怎么插进别人页面里的
+
+「在站点自带的操作栏里加一个按钮」听起来简单，实际有三个坑：
+
+**1. 不要 cloneNode 原生按钮。**
+最直觉的做法是复制一个现成的按钮再改图标和文字，但那些节点里是自定义元素
+（`button-view-model` 之类）。克隆出来的副本一插进文档就会被 upgrade 并重新渲染，
+把我们塞进去的内容冲掉，最后得到一个空按钮。
+
+**2. 抄 class，而不是抄几份固定样式。**
+改成「运行时从原生按钮上读 class 名，用普通 DOM 拼自己的按钮」——
+这样配色、尺寸、圆角、暗色主题全都自动跟随站点，站点改版也不怕（class 是当场读的）。
+代价是要挑对「捐赠者」按钮，见下一条。
+
+**3. `#top-level-buttons-computed` 在真实 DOM 里出现 3 次，其中靠前的是空占位。**
+YouTube 会把同一段元数据渲染好几份（模板残留），`document.querySelector` 恰好会命中
+那个空壳，于是抄不到任何 class，只能退化成兜底样式。
+正确做法是**只在插入位置所在的那一行菜单里找捐赠者**，而不是全局查。
+
+另外 YouTube 是 SPA，路由切换和局部重渲染都会把节点冲掉，所以挂了
+`MutationObserver` + `yt-navigate-finish` 反复补挂；并且做了「自愈」：
+首次注入时原生按钮可能还没渲染完（皮肤没抄到），等拿到捐赠者就重建一次换上原生外观。
+
+这套逻辑的验证不看静态检查，直接上真页面：
+
+```bash
+npm run yt                      # 真实 YouTube 观看页，15 项断言
+npm run yt -- --headed          # 有头，肉眼看
+npm run yt -- --url=<别的视频>   # 换一个视频
+```
+
+测的是：注入位置在不在 `#flexible-item-buttons` 内、有没有误插到首页/侧栏、
+class 抄没抄到、高度和同行原生按钮是否一致、图标是不是真的渲染出来了（0 尺寸 / stroke:none
+都会被抓出来）、悬浮球有没有收起、点击能否开合、以及**节点被清空后会不会自动补挂**。
 
 ---
 
@@ -42,6 +84,8 @@ npm run vendor       # 把运行时抽到 lib/transformers/（已提交，通常
 
 > 验证：`npm run check`（静态自检）+ `npm run smoke`（真机装扩展跑一遍 UI）。
 > 想连模型推理一起验：`npm run smoke:full`。
+> 想看 YouTube 操作栏入口：`npm run yt`（需要能访问 youtube.com）。
+> 全跑一遍：`npm run verify:all`。
 
 ---
 
@@ -77,11 +121,13 @@ ytb2text/
 │   ├── export.js              # TXT / SRT / VTT 格式化与下载
 │   └── transformers/          # vendored 运行时（约 32MB，随仓库提交）
 ├── icons/
-├── screenshots/               # 冒烟测试自动产出的界面截图（README 用）
+├── screenshots/               # 测试自动产出的界面截图（README 用）
 ├── tools/
 │   ├── vendor.js              # 从 node_modules 抽运行时到 lib/
 │   ├── selfcheck.js           # 静态自检：文件引用 / 样式类名 / 常量一致性
-│   ├── smoke.js               # 真机冒烟测试（CDP 驱动本机 Chrome）
+│   ├── cdp.js                 # 极简 CDP 客户端（下面两个脚本共用）
+│   ├── smoke.js               # 离线冒烟测试（CDP 驱动本机 Chrome + 本地测试页）
+│   ├── youtube-check.js       # 真实 YouTube 观看页验证「操作栏原生入口」
 │   ├── pack.sh                # 打 .crx
 │   └── zip.sh                 # 打商店 zip
 └── docs/privacy.html          # 隐私政策（上架用）
