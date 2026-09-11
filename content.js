@@ -1,9 +1,9 @@
 /**
- * content.js —— 注入到每个页面的面板 UI（无构建版，普通脚本）。
+ * content.js —— 注入到 YouTube 页面的面板 UI（无构建版，普通脚本）。
  *
  * 交互对标 bili-mux：右下角一颗悬浮按钮，点开是页面内的卡片面板。
- * 面板本身不做任何重活 —— 录音、解码重采样、Whisper 推理全在 Offscreen Document 里，
- * 这里只负责「采集音频 → 交给 offscreen → 展示进度与结果」。
+ * 面板本身不做重活 —— 解码重采样、Whisper 推理全在 Offscreen Document 里，
+ * 这里只负责「拿到音频 → 交给 offscreen → 展示进度与结果」。
  *
  * 两个必须记住的约束：
  *   1. chrome.runtime.sendMessage 是 JSON 序列化，ArrayBuffer 到对面会变成 {}。
@@ -11,6 +11,12 @@
  *      好处是传的是 PCM 而不是整个 mp4 容器，体积小一个数量级。
  *   2. 面板 DOM 全部用 createElement 拼，不用 innerHTML ——
  *      部分站点（如 Google 系）强制 Trusted Types，innerHTML 赋值会直接抛错。
+ *
+ * 音频从哪来（重点，别再让用户去录）：
+ *   播放器一定会去 CDN 拉媒体分片，这些请求的 URL 会留在 performance 资源时间线里。
+ *   直接挑一条「带音轨」的 URL 整条下载 → 解码 → 转录，不需要任何录制、不需要权限。
+ *   只有在下载这条路彻底走不通时，才自动退到「从播放器 captureStream 边播边录」，
+ *   这一步也是自动的，不需要用户做任何事。
  */
 (function () {
   'use strict';
@@ -29,6 +35,11 @@
 
   // 只在这些站点去探测页面自带字幕轨（其余站点探测是纯浪费）
   var MAY_HAVE_CAPTIONS = /(^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be)$/i;
+
+  // 纯音频轨（itag 从高音质到低音质）；YouTube 不一定给得出，给不出就用复合流
+  var AUDIO_ONLY_ITAGS = [251, 140, 250, 249, 139, 171, 234, 233, 172, 141];
+  // 音视频合在一起的复合流（有音轨，文件会大一些，但一定能解出声音）
+  var MUXED_ITAGS = [18, 22, 43, 36, 34, 35, 59, 78];
 
   /* ==================== 小工具 ==================== */
 
@@ -87,6 +98,13 @@
     return bytesToB64(bytes);
   }
 
+  function b64ToBytes(b64) {
+    var bin = atob(b64);
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
   function callSW(type, payload) {
     return chrome.runtime.sendMessage({ target: 'sw', type: type, payload: payload || {} });
   }
@@ -99,6 +117,11 @@
     return String(s == null ? '' : s);
   }
 
+  function shortErr(e) {
+    var s = String((e && e.message) || e || '未知原因');
+    return s.length > 60 ? s.slice(0, 60) + '…' : s;
+  }
+
   /* ==================== 状态 ==================== */
 
   var state = {
@@ -106,25 +129,21 @@
     requestId: null,
     segments: [],
     view: 'plain',
-    source: '',
     recTimerId: null,
     recStart: 0,
     inferTimerId: null,
     inferStart: 0,
     audioDuration: 0,
-    mountedAt: Date.now(),
-    // 录制有两种：'tab' 走 offscreen（标签页音频），'element' 走页面内 captureStream
-    recKind: null,
+    // 兜底「边播边录」时用的本地录制句柄
     localRec: null,
   };
 
   /* ==================== DOM 骨架 ==================== */
 
-  var badge, body, mediaList, captionList, recPanel, recTimer, recTip, pagePanel;
+  var badge, body, mediaInfo, captionRow, recPanel, recTimer, recTip;
   var progressCard, barFill, progressText, progressDetail;
-  var resultCard, resultBox, resultMeta, fileInput, panel, fab, fabDot, srcHint;
-  var modelSelect, langSelect, deviceSelect, mirrorSelect, translateChk, filterChk, modelHint;
-  var srcButtons = [];
+  var resultCard, resultBox, resultMeta, panel, fab, fabDot, srcHint, goBtn;
+  var modelSelect, langSelect, deviceSelect, mirrorSelect, filterChk, modelHint;
 
   function buildUI() {
     badge = h('span', { class: 'v2t-badge', text: '未加载' });
@@ -134,22 +153,17 @@
       text: '首次使用会下载一次模型（之后缓存在本地，完全离线可跑）。',
     });
 
-    mediaList = h('div', { class: 'v2t-list' });
-    captionList = h('div', { class: 'v2t-list' });
-    pagePanel = h('div', { class: 'v2t-sub-panel', hidden: true }, [mediaList, captionList]);
+    mediaInfo = h('div', { class: 'v2t-empty', text: '正在检测当前视频的音频轨…' });
+    captionRow = h('div', { class: 'v2t-btn-row', hidden: true });
 
-    recTip = h('span', { class: 'v2t-rec-tip', text: '正在录制标签页声音，请保持视频播放' });
+    recTip = h('span', { class: 'v2t-rec-tip', text: '正在录制' });
     recPanel = h('div', { class: 'v2t-sub-panel', hidden: true }, [
-      h('div', { class: 'v2t-rec-row' }, [
-        h('span', { class: 'v2t-rec-dot' }),
-        recTimer,
-        recTip,
-      ]),
+      h('div', { class: 'v2t-rec-row' }, [h('span', { class: 'v2t-rec-dot' }), recTimer, recTip]),
       h('button', {
         class: 'v2t-btn v2t-danger v2t-full',
         id: 'v2t-stop-rec',
         text: '停止并开始转录',
-        on: { click: stopCurrentRecording },
+        on: { click: stopLocalRecording },
       }),
     ]);
 
@@ -157,7 +171,6 @@
     langSelect = h('select', { id: 'v2t-lang' });
     deviceSelect = h('select', { id: 'v2t-device' });
     mirrorSelect = h('select', { id: 'v2t-mirror' });
-    translateChk = h('input', { type: 'checkbox', id: 'v2t-translate' });
     filterChk = h('input', { type: 'checkbox', id: 'v2t-filter', checked: true });
     modelHint = h('p', { class: 'v2t-hint v2t-small' });
 
@@ -204,46 +217,27 @@
           text: '复制',
           on: { click: copyResult },
         }),
-        h('button', {
-          class: 'v2t-btn',
-          text: 'TXT',
-          on: { click: function () { exportAs('txt'); } },
-        }),
-        h('button', {
-          class: 'v2t-btn',
-          text: 'SRT',
-          on: { click: function () { exportAs('srt'); } },
-        }),
-        h('button', {
-          class: 'v2t-btn',
-          text: 'VTT',
-          on: { click: function () { exportAs('vtt'); } },
-        }),
+        h('button', { class: 'v2t-btn', text: 'TXT', on: { click: function () { exportAs('txt'); } } }),
+        h('button', { class: 'v2t-btn', text: 'SRT', on: { click: function () { exportAs('srt'); } } }),
+        h('button', { class: 'v2t-btn', text: 'VTT', on: { click: function () { exportAs('vtt'); } } }),
       ]),
       resultMeta,
     ]);
 
-    srcButtons = [
-      mkSrcButton('tab', '●', '录制当前标签页', '边播边录，通用'),
-      mkSrcButton('file', '▲', '本地音视频文件', '最稳定'),
-      mkSrcButton('page', '▶', '页面内视频', '免录制 / 取字幕'),
-    ];
-
-    fileInput = h('input', {
-      type: 'file',
-      accept: 'audio/*,video/*',
-      style: 'display:none',
-      on: { change: onFilePicked },
+    goBtn = h('button', {
+      class: 'v2t-btn v2t-primary v2t-full',
+      id: 'v2t-go',
+      text: '开始转写',
+      on: { click: startTranscribe },
     });
 
     body = h('div', { class: 'v2t-body' }, [
       h('section', { class: 'v2t-card' }, [
-        h('h2', { text: '1 · 选择音频来源' }),
-        h('div', { class: 'v2t-sources' }, srcButtons),
-        srcHint,
+        h('h2', { text: '1 · 转写当前视频' }),
+        mediaInfo,
+        goBtn,
+        captionRow,
         recPanel,
-        pagePanel,
-        fileInput,
       ]),
       h('section', { class: 'v2t-card' }, [
         h('h2', { text: '2 · 设置' }),
@@ -254,16 +248,13 @@
           h('label', { class: 'v2t-field' }, [h('span', { text: '运行设备' }), deviceSelect]),
         ]),
         h('label', { class: 'v2t-field' }, [h('span', { text: '模型下载源' }), mirrorSelect]),
-        h('label', { class: 'v2t-check' }, [
-          translateChk,
-          h('span', { text: '翻译成英文（task=translate）' }),
-        ]),
         h('label', { class: 'v2t-check' }, [filterChk, h('span', { text: '过滤静音 / 幻觉片段' })]),
         h('button', {
           class: 'v2t-btn v2t-ghost v2t-full',
           text: '预加载模型',
           on: { click: preloadModel },
         }),
+        srcHint,
       ]),
       progressCard,
       resultCard,
@@ -298,41 +289,23 @@
         title: '视频转文字（本地 Whisper）',
         on: { click: function () { setPanelOpen(panel.hidden); } },
       },
-      // 圆形里的「文字线条」图标：三条长短不一的横线 + 一个方框
-      [
-        svgIcon('M4 6h16M4 11h10M4 16h13'),
-        fabDot,
-      ]
+      // 圆形里的「文字线条」图标：三条长短不一的横线
+      [svgIcon('M4 6h16M4 11h10M4 16h13'), fabDot]
     );
 
     var root = h('div', { id: 'v2t-root' }, [panel, fab]);
 
     function mount() {
       if (document.body) document.body.appendChild(root);
-      else document.addEventListener('DOMContentLoaded', function () {
-        document.body.appendChild(root);
-      });
+      else
+        document.addEventListener('DOMContentLoaded', function () {
+          document.body.appendChild(root);
+        });
     }
     mount();
 
     bindSettings();
     return root;
-  }
-
-  function mkSrcButton(src, ico, label, sub) {
-    return h(
-      'button',
-      {
-        class: 'v2t-src',
-        data: { src: src },
-        on: { click: function () { pickSource(src); } },
-      },
-      [
-        h('span', { class: 'v2t-ico', text: ico }),
-        h('span', { class: 'v2t-lbl', text: label }),
-        h('span', { class: 'v2t-sub', text: sub }),
-      ]
-    );
   }
 
   /* ==================== 面板开合 ==================== */
@@ -346,7 +319,13 @@
       } catch (e) {
         /* ignore */
       }
-      refreshPageMedia();
+      refreshMediaInfo();
+    } else {
+      try {
+        chrome.storage.local.set({ v2t_panel_open: false });
+      } catch (e) {
+        /* ignore */
+      }
     }
   }
 
@@ -369,7 +348,7 @@
       language: langSelect.value,
       device: deviceSelect.value,
       mirror: mirrorSelect.value,
-      translate: translateChk.checked,
+      translate: false,
       filterNoise: filterChk.checked,
     };
   }
@@ -380,7 +359,6 @@
     fillSelect(langSelect, C.LANGUAGES, m.language);
     fillSelect(deviceSelect, C.DEVICES, m.device);
     fillSelect(mirrorSelect, C.MIRRORS, m.mirror);
-    translateChk.checked = !!m.translate;
     filterChk.checked = m.filterNoise !== false;
     updateModelHint();
   }
@@ -415,18 +393,14 @@
     [langSelect, deviceSelect, mirrorSelect].forEach(function (s) {
       s.addEventListener('change', saveSettings);
     });
-    [translateChk, filterChk].forEach(function (c) {
-      c.addEventListener('change', saveSettings);
-    });
+    filterChk.addEventListener('change', saveSettings);
   }
 
   /* ==================== 进度 / 忙碌态 ==================== */
 
   function setBusy(busy) {
     state.busy = busy;
-    srcButtons.forEach(function (b) {
-      b.disabled = busy;
-    });
+    goBtn.disabled = busy;
     progressCard.hidden = !busy;
     if (busy) {
       resultCard.hidden = true;
@@ -579,390 +553,300 @@
     }
   }
 
-  /* ==================== 三条音频链路 ==================== */
+  /* ==================== 音频从哪来 ==================== */
+  //
+  // 不需要用户录制：播放器为了播下去，一定会去 CDN 拉媒体分片，
+  // 而这些请求的 URL 会留在 performance 的资源时间线里（跨域也会留下 name）。
+  // 挑一条带音轨的整条下载即可 —— 这也是 bili-mux 那类工具的思路（拿流，不录屏）。
 
-  function pickSource(src) {
-    if (state.busy) return;
-    state.source = src;
-    srcButtons.forEach(function (b) {
-      b.classList.toggle('on', b.dataset.src === src);
-    });
-    recPanel.hidden = src !== 'tab';
-    pagePanel.hidden = src !== 'page';
+  // 这些路径跟媒体无关（统计 / 心跳 / 广告回传），混进来会让「抓到了几条」失真
+  var NOT_MEDIA_PATH = /(generate_204|ptracking|\/api\/|\/stats|initplayback|log_event)/i;
 
-    if (src === 'tab') startTabRecording();
-    else if (src === 'file') fileInput.click();
-    else if (src === 'page') refreshPageMedia();
-  }
-
-  /* ---- 1) 录制当前标签页 ---- */
-
-  async function startTabRecording() {
-    setBusy(true);
-    setProgress('正在获取标签页音频权限…', '');
-    try {
-      var res = await callSW('tab:getStreamId', {});
-      if (!res || !res.ok) throw new Error((res && res.error) || '无法获取标签页音频');
-
-      var rid = newRequestId();
-      state.requestId = rid;
-      state.recKind = 'tab';
-
-      recPanel.hidden = false;
-      recTip.textContent = '正在录制标签页声音，请保持视频播放';
-      recTimer.textContent = '00:00';
-      startRecTimer();
-      setProgress('录制中…', '请让视频保持播放；完成后点「停止并开始转录」');
-      setIndeterminate();
-      srcHint.textContent = '录制中：标签页音频（最长 15 分钟自动停止）';
-
-      var r = await callOffscreen('rec:start', {
-        requestId: rid,
-        streamId: res.streamId,
-        options: getSettings(),
-        maxSeconds: C.DEFAULT_SETTINGS.maxRecordSeconds,
-      });
-      if (!r || !r.ok) throw new Error((r && r.error) || '录制启动失败');
-    } catch (e) {
-      recPanel.hidden = true;
-      state.recKind = null;
-      stopTimers();
-      fail(String((e && e.message) || e));
-    }
-  }
-
-  /** 「停止并开始转录」按钮的唯一入口 —— 两种录制各自收尾 */
-  function stopCurrentRecording() {
-    if (state.recKind === 'element') {
-      if (state.localRec) state.localRec.stop();
-      return;
-    }
-    return stopRecordingAndTranscribe();
-  }
-
-  async function stopRecordingAndTranscribe() {
-    recPanel.hidden = true;
-    state.recKind = null;
-    if (state.recTimerId) clearInterval(state.recTimerId);
-    state.recTimerId = null;
-    setBusy(true);
-    setProgress('正在解码录音…', '');
-    setIndeterminate();
-    try {
-      var res = await callOffscreen('rec:stop', { requestId: state.requestId });
-      if (!res || !res.ok) throw new Error((res && res.error) || '停止录制失败');
-      // 之后走 'ui' 广播：progress → result / error
-    } catch (e) {
-      fail(String((e && e.message) || e));
-    }
-  }
-
-  /* ---- 2) 本地文件 ---- */
-
-  function onFilePicked() {
-    var file = fileInput.files && fileInput.files[0];
-    fileInput.value = '';
-    if (!file) return;
-    submitFileObject(file);
-  }
-
-  async function submitFileObject(file) {
-    setBusy(true);
-    setProgress('正在读取文件…', file.name + '（' + C.formatBytes(file.size) + '）');
-    setIndeterminate();
-    try {
-      var buf = await file.arrayBuffer();
-      await submitAudioBuffer(buf, file.name);
-    } catch (e) {
-      fail(String((e && e.message) || e));
-    }
-  }
-
-  /* ---- 3) 页面内视频 ---- */
-
-  function scanMedia() {
-    var nodes = document.querySelectorAll('video, audio');
+  function mediaUrlsFromTimeline() {
     var out = [];
-    for (var i = 0; i < nodes.length; i++) {
-      var el = nodes[i];
-      var src = el.currentSrc || el.src || '';
-      if (!src) continue;
-      out.push({
-        el: el,
-        tag: (el.tagName || '').toLowerCase(),
-        src: src,
-        // http(s) = 能直接下载原始文件；blob: = MSE 边下边播的流，拿不到文件，
-        // 只能「边播边录」（见 startElementCapture）
-        mode: /^https?:/i.test(src) ? 'direct' : 'capture',
-        duration: el.duration && isFinite(el.duration) ? el.duration : 0,
-        title: el.getAttribute('title') || document.title,
-      });
+    try {
+      var list = performance.getEntriesByType('resource') || [];
+      for (var i = 0; i < list.length; i++) {
+        var n = list[i].name || '';
+        if (n.indexOf('googlevideo.com/') >= 0 && !NOT_MEDIA_PATH.test(n)) out.push(n);
+      }
+    } catch (e) {
+      /* 极端情况下 performance 不可用 */
     }
     return out;
   }
 
-  function mediaBadge() {
-    var n = scanMedia().length;
-    fabDot.classList.toggle('show', n > 0);
-  }
-
-  async function refreshPageMedia() {
-    mediaList.textContent = '';
-    captionList.textContent = '';
-
-    var medias = scanMedia().filter(function (m) {
-      return /^https?:|^blob:/i.test(m.src);
-    });
-    if (!medias.length) {
-      mediaList.appendChild(
-        h('div', {
-          class: 'v2t-empty',
-          text: '当前页面没有可直接抓取的 video/audio。加密流媒体（奈飞等）请用「录制当前标签页」。',
-        })
-      );
-    }
-    medias.forEach(function (m) {
-      var name = (m.title || m.src).slice(0, 58);
-      var badges = [h('span', { class: 'v2t-kind', text: m.tag })];
-      if (m.mode === 'capture') badges.push(h('span', { class: 'v2t-kind', text: '流媒体' }));
-      mediaList.appendChild(
-        h('div', { class: 'v2t-item' }, [
-          h('span', { class: 'v2t-name' }, badges.concat([name])),
-          h('button', {
-            class: 'v2t-mini',
-            text: m.mode === 'direct' ? '转录' : '边播边录',
-            title:
-              m.mode === 'direct'
-                ? '下载该媒体并转为文字'
-                : '这条是流媒体，拿不到原始文件，只能按播放速度实时录下声音',
-            on: { click: function () { handleMedia(m); } },
-          }),
-        ])
-      );
-    });
-
-    // 页面自带字幕（YouTube 等）：能取就别跑模型，快 100 倍且 100% 准确。
-    // 只在可能带字幕的站点去问 —— 每问一次都要往 MAIN world 注入一次脚本，
-    // 在所有站点上无脑探测既浪费、也容易在严格 CSP 的站上刷报错。
-    if (!MAY_HAVE_CAPTIONS.test(location.hostname)) return;
-
+  function parseMediaUrl(u) {
+    var q = {};
     try {
-      var res = await callSW('page:captions', {});
-      var tracks = (res && res.tracks) || [];
-      tracks.forEach(function (t) {
-        captionList.appendChild(
-          h('div', { class: 'v2t-item' }, [
-            h('span', { class: 'v2t-name' }, [
-              h('span', { class: 'v2t-kind', text: '字幕' }),
-              (t.name || t.lang) + ' (' + t.lang + ')',
-            ]),
-            h('button', {
-              class: 'v2t-mini',
-              text: '直接取字幕',
-              on: { click: function () { fetchCaptions(t); } },
-            }),
-          ])
-        );
+      var s = u.indexOf('?') >= 0 ? u.slice(u.indexOf('?') + 1) : '';
+      s.split('&').forEach(function (kv) {
+        var p = kv.split('=');
+        if (!p[0]) return;
+        try {
+          q[p[0]] = decodeURIComponent((p[1] || '').replace(/\+/g, ' '));
+        } catch (e) {
+          q[p[0]] = p[1] || '';
+        }
       });
     } catch (e) {
-      /* 不支持获取字幕的站点，静默跳过 */
+      /* ignore */
     }
+    return { url: u, itag: Number(q.itag || 0) || 0, mime: q.mime || '' };
   }
 
-  async function handleMedia(m) {
-    if (state.busy) return;
-    if (m.mode === 'capture') return startElementCapture(m, '');
-
-    setBusy(true);
-    setProgress('正在下载媒体…', m.src.slice(0, 90));
-    setIndeterminate();
-
-    var buf;
-    try {
-      buf = await downloadMedia(m);
-    } catch (e) {
-      if (e && e.cancelled) {
-        setBusy(false);
-        return;
-      }
-      // 下载不到原始文件（站点限制 / 需要登录 / 分片流）时不要给个死胡同，
-      // 直接退到「边播边录」把事办完
-      setBusy(false);
-      return startElementCapture(m, '无法直接下载（' + shortErr(e) + '），已改为边播边录：');
+  // 只有「明确带音轨」的流才要：纯音频轨 > 音视频复合流 > 没标 itag 的（最后试）
+  function audioRank(m) {
+    if (/^audio\//i.test(m.mime)) {
+      var i = AUDIO_ONLY_ITAGS.indexOf(m.itag);
+      return i >= 0 ? i : 20;
     }
-
-    try {
-      await submitAudioBuffer(buf, (m.title || 'page-media').slice(0, 60));
-    } catch (e) {
-      fail(String((e && e.message) || e));
-    }
+    var j = MUXED_ITAGS.indexOf(m.itag);
+    if (j >= 0) return 100 + j;
+    // 有些播放请求不带 itag / mime（站点改版时会这样），只能当「未知媒体流」排在最后，
+    // 真正下载前会先用 Range 探一下 Content-Type，不是音视频就不浪费流量
+    return 200;
   }
 
-  function shortErr(e) {
-    var s = String((e && e.message) || e || '未知原因');
-    return s.length > 40 ? s.slice(0, 40) + '…' : s;
+  function itagLabel(m) {
+    if (/^audio\//i.test(m.mime)) return '纯音频轨';
+    if (MUXED_ITAGS.indexOf(m.itag) >= 0) return '音视频复合流';
+    return '未标明 itag 的媒体流';
   }
 
-  async function downloadMedia(m) {
-    var head = await fetch(m.src, { method: 'HEAD', credentials: 'include' }).catch(function () {
-      return null;
+  /** 当前页面可用的、带音轨的媒体地址（按「最想要」排序） */
+  function audioCandidates() {
+    var urls = mediaUrlsFromTimeline();
+    var byKey = {};
+    var out = [];
+    urls.forEach(function (u) {
+      var m = parseMediaUrl(u);
+      var rank = audioRank(m);
+      if (rank < 0) return;
+      // 同一条流会被按 Range 请求多次，rn / rbuf 是每次随机的，去掉它们做去重
+      var key = m.itag + '|' + u.replace(/&rn=[^&]*/g, '').replace(/&rbuf=[^&]*/g, '');
+      if (byKey[key]) return;
+      byKey[key] = true;
+      m.rank = rank;
+      out.push(m);
     });
-    var len = head && head.headers.get('content-length');
-    if (len && Number(len) > 600 * 1024 * 1024) {
-      if (!confirm('该视频约 ' + C.formatBytes(Number(len)) + '，下载与解码都比较慢。继续吗？')) {
-        var c = new Error('用户取消');
-        c.cancelled = true;
-        throw c;
-      }
-    }
-    var r = await fetch(m.src, { credentials: 'include' });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return r.arrayBuffer();
+    out.sort(function (a, b) {
+      return a.rank - b.rank;
+    });
+    return out;
   }
 
-  function pickRecMime() {
-    if (typeof MediaRecorder === 'undefined') return null;
-    var cands = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
-    for (var i = 0; i < cands.length; i++) {
-      try {
-        if (MediaRecorder.isTypeSupported(cands[i])) return cands[i];
-      } catch (e) {
-        /* ignore */
-      }
+  /** 面板里那行「检测到什么」 */
+  function refreshMediaInfo() {
+    var cands = audioCandidates();
+    fabDot.classList.toggle('show', !!pageVideo());
+    mediaInfo.textContent = '';
+    if (!cands.length) {
+      mediaInfo.className = 'v2t-empty';
+      mediaInfo.textContent = '还没抓到音频轨。请让视频播放几秒（或刷新页面）后再点「开始转写」。';
+      return;
     }
-    return null;
+    var best = cands[0];
+    mediaInfo.className = 'v2t-item';
+    mediaInfo.appendChild(
+      h('span', { class: 'v2t-name' }, [
+        h('span', { class: 'v2t-kind', text: itagLabel(best) }),
+        best.itag
+          ? 'itag ' + best.itag + ' · ' + (best.mime || '未知容器') + ' · 共 ' + cands.length + ' 条可用'
+          : '共 ' + cands.length + ' 条可用（下载前会先探测类型）',
+      ])
+    );
+  }
+
+  /** 页面里的主播放器：优先挑「真的有内容在播」的那一个 */
+  function pageVideo() {
+    var list = document.querySelectorAll('video, audio');
+    var fallback = null;
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i];
+      if (!el.isConnected) continue;
+      if (!fallback) fallback = el;
+      var d = el.duration;
+      if (d && isFinite(d) && d > 0) return el;
+    }
+    return fallback;
   }
 
   /**
-   * 从播放器元素本身抓音频（HTMLMediaElement.captureStream）。
-   *
-   * 为什么需要它：YouTube / B站 / 腾讯视频这类站点用 MSE 边下边播，
-   * video.src 是个 blob: 地址，fetch 拿不到原始文件 —— 但音响里的声音是有的，
-   * captureStream 就能把它接出来，不需要 tabCapture 权限、也不会录进别的标签页声音。
-   * 代价是只能按播放速度实时录（MSE 的物理限制，没有更快的办法）。
+   * 流式下载并汇报进度。
+   * @returns {Promise<ArrayBuffer>}
    */
-  async function startElementCapture(m, note) {
-    if (state.busy) return;
-    var el = m && m.el;
-    if (!el || !el.isConnected) {
-      fail('这个播放器已经不在页面上了，请重新选择。');
-      return;
+  async function downloadWithProgress(url, onProgress) {
+    var r = await fetch(url, { credentials: 'omit' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var len = Number(r.headers.get('content-length') || 0);
+    if (!r.body || typeof r.body.getReader !== 'function') return r.arrayBuffer();
+
+    var reader = r.body.getReader();
+    var chunks = [];
+    var got = 0;
+    var last = 0;
+    for (;;) {
+      var d = await reader.read();
+      if (d.done) break;
+      chunks.push(d.value);
+      got += d.value.length;
+      var now = Date.now();
+      if (now - last > 120) {
+        last = now;
+        onProgress(got, len);
+      }
     }
-    if (typeof el.captureStream !== 'function') {
-      fail('这条媒体是流媒体（拿不到原始文件），当前浏览器又不支持直接从播放器捕获音频，请改用「录制当前标签页」。');
-      return;
+    onProgress(got, len || got);
+
+    var out = new Uint8Array(got);
+    var off = 0;
+    for (var i = 0; i < chunks.length; i++) {
+      out.set(chunks[i], off);
+      off += chunks[i].length;
+    }
+    return out.buffer;
+  }
+
+  /** 用一小段 Range 请求探一下内容类型，避免为了一条纯视频流浪费几十 MB 流量 */
+  async function probeContentType(url) {
+    try {
+      var r = await fetch(url, { headers: { Range: 'bytes=0-2047' }, credentials: 'omit' });
+      return r.headers.get('content-type') || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /** 页面内 fetch 不通时，让 SW 代劳（扩展有 host 权限，不受 CORS 限制） */
+  async function swDownload(url) {
+    var res = await callSW('media:fetch', { url: url });
+    if (!res || !res.ok) throw new Error((res && res.error) || 'SW 下载失败');
+    return b64ToBytes(res.b64).buffer;
+  }
+
+  /* ---- 主流程：一键转写 ---- */
+
+  async function startTranscribe() {
+    if (state.busy) return;
+
+    var cands = audioCandidates();
+    if (!cands.length) {
+      // 播放器还没开始拉流：先帮它播起来，等两秒再看
+      var v = pageVideo();
+      if (v) {
+        try {
+          if (v.paused) await v.play();
+        } catch (e) {
+          /* 用户手势外可能被拦，下面会给出提示 */
+        }
+      }
+      setBusy(true);
+      setProgress('正在等待播放器加载音频…', '');
+      setIndeterminate();
+      for (var w = 0; w < 12 && !audioCandidates().length; w++) {
+        await new Promise(function (r) { setTimeout(r, 1000); });
+      }
+      setBusy(false);
+      cands = audioCandidates();
+      if (!cands.length) {
+        // 真拿不到地址（站点换了 CDN、播放器没在拉流……）—— 自动退到边播边录，
+        // 不用用户做任何事；连播放器都没有才报错
+        var vf = pageVideo();
+        if (vf) {
+          startElementCapture({ el: vf, title: document.title }, '没抓到直连地址，已自动改为边播边录：');
+          return;
+        }
+        fail('没能拿到这个视频的音频地址。请确认视频正在播放，然后刷新页面重试。');
+        return;
+      }
     }
 
     setBusy(true);
-    setProgress('正在从播放器捕获音频…', note || '');
-    setIndeterminate();
+    recPanel.hidden = true;
 
-    // 暂停状态下捕获不到音频数据，先让它播起来（点击属于用户手势，play() 不会被拦）
-    try {
-      if (el.paused) await el.play();
-    } catch (e) {
-      /* 下面音轨为空时会给出更明确的提示 */
-    }
-
-    var audioTracks;
-    try {
-      audioTracks = el.captureStream().getAudioTracks();
-    } catch (e) {
-      fail('无法从播放器捕获音频：' + shortErr(e) + '。请改用「录制当前标签页」。');
-      return;
-    }
-    if (!audioTracks.length) {
-      fail('这个播放器没有可捕获的音轨（可能还没开始播放，或内容受保护）。请改用「录制当前标签页」。');
-      return;
-    }
-
-    var mime = pickRecMime();
-    var rec;
-    try {
-      rec = new MediaRecorder(new MediaStream(audioTracks), mime ? { mimeType: mime } : undefined);
-    } catch (e) {
-      fail('无法启动录制：' + shortErr(e) + '。请改用「录制当前标签页」。');
-      return;
-    }
-
-    var chunks = [];
-    var finished = false;
-    var maxMs = (C.DEFAULT_SETTINGS.maxRecordSeconds || 900) * 1000;
-
-    function cleanup() {
-      clearTimeout(hardTimer);
-      try {
-        el.removeEventListener('ended', onEnded);
-      } catch (e) {
-        /* ignore */
+    var tries = Math.min(3, cands.length);
+    var lastErr = null;
+    for (var i = 0; i < tries; i++) {
+      var m = cands[i];
+      var label = m.itag ? 'itag ' + m.itag + '（' + itagLabel(m) + '）' : itagLabel(m);
+      // 没标 itag 的「未知流」：先探一下 Content-Type，不是音视频就不下载
+      if (m.rank >= 200) {
+        var ct = await probeContentType(m.url);
+        if (!/^(audio|video)\//i.test(ct)) {
+          lastErr = new Error('这条不是音视频流（' + (ct || '探测不到类型') + '）');
+          continue;
+        }
+        label += ' · ' + ct;
       }
-      recPanel.hidden = true;
-      state.localRec = null;
-      state.recKind = null;
-      stopTimers();
-    }
-
-    function onEnded() {
-      if (!finished) stopCurrentRecording();
-    }
-
-    var hardTimer = setTimeout(function () {
-      if (!finished) stopCurrentRecording();
-    }, maxMs);
-
-    rec.ondataavailable = function (e) {
-      if (e.data && e.data.size) chunks.push(e.data);
-    };
-
-    rec.onerror = function (e) {
-      if (finished) return;
-      finished = true;
-      cleanup();
-      fail('录制出错：' + shortErr((e && e.error) || e));
-    };
-
-    rec.onstop = async function () {
-      if (finished) return;
-      finished = true;
-      cleanup();
-      setProgress('正在解码录音…', '');
+      setProgress('正在下载音频…', label);
       setIndeterminate();
       try {
-        var blob = new Blob(chunks, { type: mime || 'audio/webm' });
-        if (!blob.size) throw new Error('没有录到音频（视频可能一直没在播放）');
-        var buf = await blob.arrayBuffer();
-        await submitAudioBuffer(buf, (m.title || 'page-media').slice(0, 60) + '（边播边录）');
+        var buf = await downloadWithProgress(m.url, function (got, len) {
+          setProgress(
+            '正在下载音频…',
+            label + '｜' + C.formatBytes(got) + (len ? ' / ' + C.formatBytes(len) : ''),
+            len ? got / len : 0
+          );
+        });
+        if (!buf.byteLength) throw new Error('下载到 0 字节');
+        await submitAudioBuffer(buf, label);
+        return;
       } catch (e) {
-        fail(String((e && e.message) || e));
-      }
-    };
-
-    state.recKind = 'element';
-    state.localRec = {
-      stop: function () {
+        lastErr = e;
+        // 页面内下载被拦（CORS / 403）时换 SW 试一次，再不行就换下一条
         try {
-          if (rec.state !== 'inactive') rec.stop();
-        } catch (e) {
-          /* ignore */
+          setProgress('正在换一条链路下载…', label);
+          setIndeterminate();
+          var buf2 = await swDownload(m.url);
+          if (!buf2.byteLength) throw new Error('SW 下载到 0 字节');
+          await submitAudioBuffer(buf2, label + '（SW）');
+          return;
+        } catch (e2) {
+          lastErr = e2;
         }
-      },
-    };
+      }
+    }
 
-    recPanel.hidden = false;
-    recTip.textContent = '正在边播边录这条视频的声音（实时速度，请保持播放）';
-    if (note) srcHint.textContent = note;
-    recTimer.textContent = '00:00';
-    startRecTimer();
-    setProgress('边播边录中…', '按播放速度实时录制；完成后点「停止并开始转录」');
-    setIndeterminate();
+    // 下载这条路彻底不通：自动退到「从播放器边播边录」（不用用户做任何事）
+    var v2 = pageVideo();
+    if (v2) {
+      startElementCapture(
+        { el: v2, title: document.title },
+        '直连下载失败（' + shortErr(lastErr) + '），已自动改为边播边录：'
+      );
+      return;
+    }
+    fail('拿不到音频：' + shortErr(lastErr));
+  }
 
-    el.addEventListener('ended', onEnded, { once: true });
+  /* ---- 字幕直取（有字幕就别跑模型，快 100 倍且 100% 准） ---- */
 
+  async function refreshCaptions() {
+    captionRow.textContent = '';
+    captionRow.hidden = true;
+    if (!MAY_HAVE_CAPTIONS.test(location.hostname)) return;
     try {
-      rec.start(1000); // 每秒落一片数据，中途出错也能保住已录到的部分
+      var res = await callSW('page:captions', {});
+      var tracks = (res && res.tracks) || [];
+      if (!tracks.length) return;
+      // 优先中文/英文，其次其它
+      tracks.sort(function (a, b) {
+        function s(t) { return /^zh/i.test(t.lang) ? 0 : /^en/i.test(t.lang) ? 1 : 2; }
+        return s(a) - s(b);
+      });
+      tracks.slice(0, 3).forEach(function (t) {
+        captionRow.appendChild(
+          h('button', {
+            class: 'v2t-btn',
+            text: '直接取字幕（' + (t.name || t.lang).slice(0, 8) + '）',
+            on: { click: function () { fetchCaptions(t); } },
+          })
+        );
+      });
+      captionRow.hidden = false;
     } catch (e) {
-      cleanup();
-      fail('无法开始录制：' + shortErr(e));
+      /* 不支持获取字幕的站点，静默跳过 */
     }
   }
 
@@ -997,6 +881,148 @@
       setResult({ segments: segments, meta: { source: '页面自带字幕' } });
     } catch (e) {
       fail(String((e && e.message) || e));
+    }
+  }
+
+  /* ---- 兜底：从播放器 captureStream 边播边录（全自动，不需要用户操作） ---- */
+
+  function pickRecMime() {
+    if (typeof MediaRecorder === 'undefined') return null;
+    var cands = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+    for (var i = 0; i < cands.length; i++) {
+      try {
+        if (MediaRecorder.isTypeSupported(cands[i])) return cands[i];
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  function stopLocalRecording() {
+    if (state.localRec) state.localRec.stop();
+  }
+
+  function startElementCapture(m, note) {
+    var el = m && m.el;
+    if (!el || !el.isConnected) {
+      fail('这个播放器已经不在页面上了，请刷新页面重试。');
+      return;
+    }
+    if (typeof el.captureStream !== 'function') {
+      fail('当前浏览器不支持从播放器捕获音频，且直连下载也失败了（' + (note || '') + '）。');
+      return;
+    }
+
+    setBusy(true);
+    setProgress('正在从播放器捕获音频…', note || '');
+    setIndeterminate();
+
+    try {
+      if (el.paused) {
+        var p = el.play();
+        if (p && p.catch) p.catch(function () {});
+      }
+    } catch (e) {
+      /* 下面音轨为空时会给出更明确的提示 */
+    }
+
+    var audioTracks;
+    try {
+      audioTracks = el.captureStream().getAudioTracks();
+    } catch (e) {
+      fail('无法从播放器捕获音频：' + shortErr(e));
+      return;
+    }
+    if (!audioTracks.length) {
+      fail('这个播放器没有可捕获的音轨（可能还没开始播放，或内容受保护）。');
+      return;
+    }
+
+    var mime = pickRecMime();
+    var rec;
+    try {
+      rec = new MediaRecorder(new MediaStream(audioTracks), mime ? { mimeType: mime } : undefined);
+    } catch (e) {
+      fail('无法启动录制：' + shortErr(e));
+      return;
+    }
+
+    var chunks = [];
+    var finished = false;
+    var maxMs = (C.DEFAULT_SETTINGS.maxRecordSeconds || 900) * 1000;
+
+    function cleanup() {
+      clearTimeout(hardTimer);
+      try {
+        el.removeEventListener('ended', onEnded);
+      } catch (e) {
+        /* ignore */
+      }
+      recPanel.hidden = true;
+      state.localRec = null;
+      stopTimers();
+    }
+
+    function onEnded() {
+      if (!finished) stopLocalRecording();
+    }
+
+    var hardTimer = setTimeout(function () {
+      if (!finished) stopLocalRecording();
+    }, maxMs);
+
+    rec.ondataavailable = function (e) {
+      if (e.data && e.data.size) chunks.push(e.data);
+    };
+
+    rec.onerror = function (e) {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      fail('录制出错：' + shortErr((e && e.error) || e));
+    };
+
+    rec.onstop = async function () {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      setProgress('正在解码录音…', '');
+      setIndeterminate();
+      try {
+        var blob = new Blob(chunks, { type: mime || 'audio/webm' });
+        if (!blob.size) throw new Error('没有录到音频（视频可能一直没在播放）');
+        var buf = await blob.arrayBuffer();
+        await submitAudioBuffer(buf, (m.title || 'page-media').slice(0, 60) + '（边播边录）');
+      } catch (e) {
+        fail(String((e && e.message) || e));
+      }
+    };
+
+    state.localRec = {
+      stop: function () {
+        try {
+          if (rec.state !== 'inactive') rec.stop();
+        } catch (e) {
+          /* ignore */
+        }
+      },
+    };
+
+    recPanel.hidden = false;
+    recTip.textContent = '直连下载走不通，正在边播边录（实时速度，请保持播放）';
+    recTimer.textContent = '00:00';
+    startRecTimer();
+    setProgress('边播边录中…', '按播放速度实时录制；视频播完或点「停止并开始转录」即开始识别');
+    setIndeterminate();
+
+    el.addEventListener('ended', onEnded, { once: true });
+
+    try {
+      rec.start(1000);
+    } catch (e) {
+      cleanup();
+      fail('无法开始录制：' + shortErr(e));
     }
   }
 
@@ -1167,35 +1193,32 @@
         setBusy(false);
         progressCard.hidden = true;
         break;
-      case 'recording':
-        if (!payload.active) {
-          if (state.recTimerId) clearInterval(state.recTimerId);
-          state.recTimerId = null;
-        }
-        break;
       default:
         break;
     }
     return undefined;
   });
 
-  /* ==================== 页面原生入口 ==================== */
+  /* ==================== YouTube 原生操作栏里的「转文字」按钮 ==================== */
   //
-  // 有些站点（YouTube 观看页）自带一条操作栏。把入口做成其中一个按钮，
-  // 比在右下角浮一颗球自然得多，也不会挡住画面。
+  // 目标是把它做成「分享 / 保存 / 下载」那一行的最后一个按钮，看着像原生的一样。
   //
-  // 做法是**运行时从原生按钮上抄 class 名**，再用普通 DOM 拼一个自己的按钮：
-  //   · 抄 class  → 自动跟随站点的配色、尺寸、圆角、暗色主题，改版也不怕
-  //   · 只拼普通 DOM → 千万不要 cloneNode 原生按钮，那结构里有自定义元素，
-  //     插进文档会被 upgrade 并重新渲染，把我们塞进去的内容冲掉
+  // 三个必须记住的坑（都是实测踩出来的）：
+  //   1. 千万别 cloneNode 原生按钮 —— 那结构里有自定义元素，插进文档会被 upgrade
+  //      并重新渲染，把我们塞进去的内容冲掉。只抄 class，DOM 自己拼。
+  //   2. 光抄 class 不够：原生的 <button class="ytSpecButtonShapeNextHost"> 外面
+  //      还套着 <yt-button-view-model style="display:inline-block">，裸按钮拿到的是
+  //      display:flex（块级）→ 会掉到第二行，而 ytd-menu-renderer 只有 44px 高且
+  //      overflow:hidden —— 按钮就被裁没了。必须显式写死 inline-flex。
+  //   3. 「在 DOM 里」不等于「看得见」：还要量尺寸 + 逐级检查有没有被祖先的
+  //      overflow 裁掉。量不过就换个挂法 / 换成图标-only，再不行就把悬浮球放出来。
+  //
   // 图标用内联描边（原生容器会把 fill 设成 currentcolor，
   // 线条类路径是零面积的，不改回 stroke 就什么都不显示）。
 
   var ENTRY_ID = 'v2t-page-entry';
 
   // 「真的看得见吗」—— 有尺寸 + 未被 display:none / visibility:hidden 藏掉。
-  // YouTube 会把整组按钮折叠进「⋮」菜单，容器还在 DOM 里但尺寸为 0：
-  // 那时把入口插进去等于没插，必须能识别出来。
   function visibleBox(el) {
     if (!el || !el.isConnected) return null;
     var r = el.getBoundingClientRect();
@@ -1218,48 +1241,61 @@
     {
       name: 'youtube',
       match: /(^|\.)(youtube\.com|youtube-nocookie\.com)$/i,
-      // 必须限定在观看页里找，否则首页/侧栏的预览菜单也会被插进去。
-      // 候选按「离原生操作栏多近」排序，返回**第一个真正展开可见**的那个 ——
-      // 窗口窄时 YouTube 会把 #flexible-item-buttons 收进 ⋮ 菜单，
-      // 此时退到 #top-level-buttons-computed（赞/踩/分享那一行）。
-      anchor: function () {
-        if (!document.querySelector('ytd-watch-flexy')) return null;
-        var cands = [
-          document.querySelector('ytd-watch-metadata #flexible-item-buttons'),
-          document.querySelector('#above-the-fold #flexible-item-buttons'),
-          document.querySelector('ytd-watch-metadata #top-level-buttons-computed'),
-          document.querySelector('ytd-watch-flexy #top-level-buttons-computed'),
-        ];
-        for (var i = 0; i < cands.length; i++) {
-          var c = cands[i];
-          if (!c) continue;
-          if (!visibleBox(c)) continue;
-          if (!hasVisibleButton(c)) continue;
-          return c;
+      /**
+       * 返回**所有**可以挂的落点（已按「离原生操作栏多近」排好序）。
+       * 每个落点带一个「捐赠者」按钮 —— 抄 class 和外观都从它身上取。
+       * 必须限定在观看页里找，否则首页/侧栏的预览菜单也会被插进去。
+       */
+      anchors: function () {
+        var out = [];
+        var flexy = document.querySelector('ytd-watch-flexy');
+        if (!flexy) return out;
+        var scope =
+          document.querySelector('ytd-watch-metadata') ||
+          document.querySelector('#above-the-fold') ||
+          document;
+
+        function collect(sel) {
+          var list = scope.querySelectorAll(sel);
+          for (var i = 0; i < list.length; i++) {
+            var box = list[i];
+            if (!visibleBox(box)) continue;
+            if (!hasVisibleButton(box)) continue;
+            out.push({ box: box, donor: donorNear(box) });
+          }
         }
-        return null;
+        // 先试「分享/保存/下载」那一行（用户要的就是这里），
+        // 窗口窄、那一行被折进「⋮」时再退到「赞/踩/分享」那一行
+        collect('#flexible-item-buttons');
+        collect('#top-level-buttons-computed');
+        return out;
       },
     },
   ];
 
-  // 找「捐赠者」：抄 class 用的原生按钮。
+  // 找「捐赠者」：抄外观用的原生按钮。
   // 关键是**只在插入位置所在的那一行里找** —— YouTube 会把同一段元数据在 DOM 里
-  // 渲染好几份（其中靠前的几份是空占位模板），全局 querySelector 很容易抓到空壳，
-  // 抄不到 class 就只能退化成兜底样式。
+  // 渲染好几份（其中靠前的几份是空占位模板），全局 querySelector 很容易抓到空壳。
   function donorNear(anchor) {
     var row = anchor.closest('ytd-menu-renderer') || anchor.parentElement;
     if (!row) return null;
-    var btns = row.querySelectorAll('button[aria-label]');
-    var withIcon = null;
+    var btns = row.querySelectorAll('button');
     var withText = null;
+    var withIcon = null;
+    var any = null;
     for (var i = 0; i < btns.length; i++) {
-      if (!btns[i].querySelector('svg')) continue;
-      if (!withIcon) withIcon = btns[i];
+      var b = btns[i];
+      if (b.id === ENTRY_ID) continue; // 别把自己当捐赠者
+      if (!visibleBox(b)) continue;
+      if (!any) any = b;
+      // 站点不一定把图标渲染成 <svg>（可能用 CSS mask 或还没渲染出来），
+      // 所以 svg 只作为「优先」条件，不能当成门槛
+      if (b.querySelector('svg')) withIcon = b;
       // 一直覆盖 → 最终拿到「最后一个有文字」的按钮（分享 / 保存 / 下载那一类），
       // 它的结构（图标 + 文字）和我们做的按钮最贴合
-      if (btns[i].textContent.trim()) withText = btns[i];
+      if (b.textContent.trim()) withText = b;
     }
-    return withText || withIcon || btns[0] || null;
+    return withText || withIcon || any || null;
   }
 
   function entrySite() {
@@ -1269,24 +1305,74 @@
     return null;
   }
 
-  // 从原生按钮上读出三处 class：按钮本体 / 图标容器 / 文字容器
-  function readSkin(donor) {
-    if (!donor) return null;
-    var box = donor.querySelector('[aria-hidden="true"]');
-    var wrap = box && box.firstElementChild;
-    var shape = wrap && wrap.firstElementChild;
-    var text = null;
-    for (var i = 0; i < donor.children.length; i++) {
-      var c = donor.children[i];
-      if (c !== box && c.tagName === 'DIV') { text = c; break; }
+  /* ---- 外观：从原生按钮的 computed style 抄，再用内联样式钉死 ---- */
+
+  var SKIN_PROPS = [
+    'height', 'minHeight', 'maxHeight', 'minWidth',
+    'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+    'marginTop', 'marginRight', 'marginBottom', 'marginLeft',
+    'borderRadius', 'backgroundColor', 'color',
+    'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing',
+    'alignItems', 'justifyContent', 'gap', 'boxShadow', 'borderWidth', 'borderStyle', 'borderColor',
+  ];
+
+  function kebab(p) {
+    return p.replace(/[A-Z]/g, function (c) {
+      return '-' + c.toLowerCase();
+    });
+  }
+
+  function setImportant(el, prop, value) {
+    try {
+      el.style.setProperty(kebab(prop), value, 'important');
+    } catch (e) {
+      /* ignore */
     }
-    return {
-      btn: donor.className || '',
-      box: box ? box.className : '',
-      wrap: wrap ? wrap.className : '',
-      shape: shape ? shape.className : '',
-      text: text ? text.className : '',
-    };
+  }
+
+  /**
+   * 把捐赠者的外观抄过来，并钉死几条「布局上不能让步」的属性。
+   * 用内联 important 是为了压过站点样式表里所有同名的规则 —— 站点随时会改版，
+   * 只有钉死了才能保证按钮不会哪天又变成 display:flex 掉出可视区。
+   */
+  function applySkin(btn, donor) {
+    if (donor) {
+      var cs = null;
+      try {
+        cs = window.getComputedStyle(donor);
+      } catch (e) {
+        cs = null;
+      }
+      if (cs) {
+        SKIN_PROPS.forEach(function (p) {
+          var v = cs[p];
+          if (v && v !== 'auto' && v !== 'normal' && v !== '0px') setImportant(btn, p, v);
+        });
+      }
+      btn.className = (donor.className || '') + ' v2t-entry';
+    } else {
+      btn.className = 'v2t-entry v2t-entry-plain';
+      setImportant(btn, 'height', '36px');
+      setImportant(btn, 'padding', '0 14px');
+      setImportant(btn, 'borderRadius', '18px');
+      setImportant(btn, 'backgroundColor', 'rgba(0, 0, 0, 0.05)');
+      setImportant(btn, 'color', 'inherit');
+      setImportant(btn, 'fontSize', '14px');
+      setImportant(btn, 'fontWeight', '500');
+    }
+    // 这几条是「掉到第二行被裁掉」的直接解药，必须写死
+    setImportant(btn, 'display', 'inline-flex');
+    setImportant(btn, 'flex', '0 0 auto');
+    setImportant(btn, 'verticalAlign', 'middle');
+    setImportant(btn, 'boxSizing', 'border-box');
+    setImportant(btn, 'whiteSpace', 'nowrap');
+    setImportant(btn, 'minWidth', '0');
+    setImportant(btn, 'visibility', 'visible');
+    setImportant(btn, 'opacity', '1');
+    setImportant(btn, 'cursor', 'pointer');
+    setImportant(btn, 'position', 'relative');
+    setImportant(btn, 'alignItems', 'center');
+    setImportant(btn, 'justifyContent', 'center');
   }
 
   // 描边图标（原生容器的 fill: currentcolor 会让零面积的线条路径消失，所以内联写死 stroke）
@@ -1313,84 +1399,179 @@
     setPanelOpen(panel.hidden);
   }
 
-  function buildEntry(anchor) {
-    var skin = readSkin(donorNear(anchor));
-    var icon = strokeIcon();
-
-    var inner = h('div', { style: 'width:100%;height:100%;display:block' }, [icon]);
-    var shape = h('span', { class: skin ? skin.shape : '' }, [inner]);
-    var wrap = h('span', { class: skin ? skin.wrap : '', style: 'width:24px;height:24px' }, [shape]);
-    var iconBox = h('div', { class: skin ? skin.box : '', 'aria-hidden': 'true' }, [wrap]);
-    var textBox = h('div', { class: skin ? skin.text : '', text: '转文字' });
-
-    return h(
+  /**
+   * @param {Element|null} donor 抄外观用的原生按钮
+   * @param {'text'|'icon'} variant text = 图标+文字；icon = 只留图标（更窄，防被挤掉）
+   */
+  function buildEntry(donor, variant) {
+    var iconBox = h(
+      'div',
+      {
+        'aria-hidden': 'true',
+        style:
+          'display:inline-flex;align-items:center;justify-content:center;' +
+          'width:24px;height:24px;flex:0 0 auto;' +
+          (variant === 'text' ? 'margin-right:6px;' : ''),
+      },
+      [strokeIcon()]
+    );
+    var kids = [iconBox];
+    if (variant === 'text') {
+      kids.push(
+        h('div', { style: 'line-height:1;white-space:nowrap;overflow:hidden;', text: '转文字' })
+      );
+    }
+    var btn = h(
       'button',
       {
         id: ENTRY_ID,
         type: 'button',
-        class: (skin ? skin.btn + ' ' : '') + 'v2t-entry' + (skin ? '' : ' v2t-entry-plain'),
         title: '视频转文字（本地 Whisper）',
         'aria-label': '视频转文字（本地 Whisper）',
         on: { click: onEntryClick },
       },
-      [iconBox, textBox]
+      kids
     );
+    applySkin(btn, donor);
+    // 记下这次用的是「原生外观」还是「兜底外观」—— 首次挂载时原生按钮可能还没渲染，
+    // 会先落个兜底的；等捐赠者出现后要能自动换成原生外观（见 syncEntry 的自愈分支）
+    btn.dataset.skin = donor ? 'native' : 'plain';
+    btn.dataset.variant = variant;
+    if (variant === 'icon') setImportant(btn, 'padding', '0 8px');
+    return btn;
   }
+
+  /**
+   * 「这个入口真的看得见吗」。
+   * 三条都过才算：尺寸够大、没被 display/visibility 藏、没被任何祖先的 overflow 裁掉。
+   */
+  function entryMetrics(node) {
+    if (!node || !node.isConnected) return { ok: false, why: '节点不在 DOM 里' };
+    var r = node.getBoundingClientRect();
+    if (r.width < 20 || r.height < 20) {
+      return {
+        ok: false,
+        why: '只有 ' + Math.round(r.width) + '×' + Math.round(r.height) + ' 像素（被压扁了）',
+      };
+    }
+    var st = window.getComputedStyle(node);
+    if (st.display === 'none') return { ok: false, why: 'display:none' };
+    if (st.visibility === 'hidden') return { ok: false, why: 'visibility:hidden' };
+
+    var n = node.parentElement;
+    var level = 0;
+    while (n && n !== document.documentElement && level < 8) {
+      var s = window.getComputedStyle(n);
+      var rb = n.getBoundingClientRect();
+      if (/hidden|clip|auto|scroll/.test(s.overflowX + ' ' + s.overflowY)) {
+        if (r.right > rb.right + 1 || r.left < rb.left - 1 || r.bottom > rb.bottom + 1 || r.top < rb.top - 1) {
+          return {
+            ok: false,
+            why: '被 ' + n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') + ' 的 overflow 裁掉了',
+          };
+        }
+      }
+      n = n.parentElement;
+      level++;
+    }
+    return { ok: true, why: '' };
+  }
+
+  /**
+   * 跟同行的原生按钮对齐高度。
+   * 捐赠者的 <button> 有时比它的外层壳子（yt-button-view-model）矮几像素，
+   * 直接抄会矮一截；插进去之后拿邻居再校一次，视觉上才真的像一家人。
+   */
+  function alignToNeighbors(btn, box) {
+    var mine = btn.getBoundingClientRect().height;
+    var kids = box.children;
+    for (var i = 0; i < kids.length; i++) {
+      var k = kids[i];
+      if (k === btn || !k.tagName) continue;
+      var r = k.getBoundingClientRect();
+      if (r.height > mine + 1 && r.height - mine <= 12) {
+        setImportant(btn, 'height', Math.round(r.height) + 'px');
+        return;
+      }
+    }
+  }
+
+  var lastEntryWhy = '还没尝试挂载';
 
   function syncEntry() {
     var site = entrySite();
-    var ok = false;
+    var chain = site ? site.anchors() : [];
+    var node = document.getElementById(ENTRY_ID);
 
-    // anchor() 只会返回「真正展开可见」的容器，所以拿不到就说明现在没有能挂的位置
-    var anchor = site ? site.anchor() : null;
+    // 已经挂上了：确认它还在一个「可用落点」里、依然看得见、而且是最好看的版本。
+    // 首次挂载时原生按钮常常还没渲染完，会先落一个兜底外观 —— 现在能抄到捐赠者了，
+    // 就重建一次换上原生外观（YouTube 是 SPA，这一步躲不掉）。
+    if (node && node.isConnected) {
+      var m = entryMetrics(node);
+      var host = null;
+      for (var k = 0; k < chain.length; k++) {
+        if (chain[k].box === node.parentElement) host = chain[k];
+      }
+      var canUpgrade = !!host && !!host.donor && node.dataset.skin === 'plain';
+      if (m.ok && host && !canUpgrade) {
+        lastEntryWhy = '';
+        if (fab) fab.hidden = true;
+        return true;
+      }
+      lastEntryWhy = host ? (canUpgrade ? '正在换成原生外观' : m.why) : '落点已经不展开了';
+      node.parentNode.removeChild(node);
+      node = null;
+    }
 
-    if (anchor) {
-      var node = document.getElementById(ENTRY_ID);
-      var stale = !!(node && node.isConnected) && !visibleBox(node);
-      if (stale) {
-        // 之前挂在了后来被折叠/隐藏的容器里，清掉重挂
-        node.parentNode.removeChild(node);
-        node = null;
-      }
-      if (node && node.isConnected) {
-        // 自愈：首次注入时原生按钮可能还没渲染完，皮肤没抄到就退化成兜底样式。
-        // 现在能拿到捐赠者了，就重建一次换上原生外观。
-        if (node.classList.contains('v2t-entry-plain') && donorNear(anchor)) {
-          node.parentNode.removeChild(node);
-          node = null;
-        }
-      }
-      if (node && node.isConnected) {
-        ok = true;
-      } else {
+    if (!chain.length) {
+      lastEntryWhy = '没找到可挂载的操作栏（页面还没渲染完，或这一行被折进 ⋮ 了）';
+      if (fab) fab.hidden = false;
+      return false;
+    }
+
+    // 逐个落点试：先试「图标+文字」，放不下就换成「只留图标」，再不行换下一个落点
+    for (var i = 0; i < chain.length; i++) {
+      var variants = ['text', 'icon'];
+      for (var v = 0; v < variants.length; v++) {
+        var btn = buildEntry(chain[i].donor, variants[v]);
+        var mm = { ok: false, why: '' };
         try {
-          anchor.appendChild(buildEntry(anchor));
-          var fresh = document.getElementById(ENTRY_ID);
-          ok = !!visibleBox(fresh);
-          if (!ok && fresh && fresh.parentNode) fresh.parentNode.removeChild(fresh);
-        } catch (err) {
-          ok = false;
+          chain[i].box.appendChild(btn);
+          alignToNeighbors(btn, chain[i].box);
+          mm = entryMetrics(btn);
+        } catch (e) {
+          mm = { ok: false, why: '插入失败：' + shortErr(e) };
+        }
+        if (mm.ok) {
+          lastEntryWhy = '';
+          if (fab) fab.hidden = true;
+          return true;
+        }
+        lastEntryWhy = mm.why;
+        try {
+          chain[i].box.removeChild(btn);
+        } catch (e) {
+          /* ignore */
         }
       }
     }
 
-    // 只有「原生入口确实看得见」才收起右下角的悬浮球 ——
-    // 否则用户会一个入口都找不到（这正是把按钮插进被折叠容器时的坑）
-    if (fab) fab.hidden = ok;
-    return ok;
+    // 一个落点都放不下：把悬浮球放出来，保证用户至少有一个入口
+    if (fab) fab.hidden = false;
+    return false;
   }
 
-  // 「现在这个入口是好的吗」—— 节点在、可见、而且是原生外观
+  // 「现在这个入口是好的吗」
   function entryHealthy() {
-    var node = document.getElementById(ENTRY_ID);
-    return !!(node && node.isConnected && !node.classList.contains('v2t-entry-plain') && visibleBox(node));
+    return entryMetrics(document.getElementById(ENTRY_ID)).ok;
   }
 
   // 给 popup 看的自检结果：入口没显示出来时，一眼能看出卡在哪一步
   function entryStatus() {
     var site = entrySite();
-    var anchor = site ? site.anchor() : null;
+    var chain = site ? site.anchors() : [];
     var node = document.getElementById(ENTRY_ID);
+    var m = entryMetrics(node);
     var anyVisible = function (sel) {
       var list = document.querySelectorAll(sel);
       for (var i = 0; i < list.length; i++) {
@@ -1402,11 +1583,14 @@
       host: location.hostname,
       supported: !!site,
       siteName: site ? site.name : null,
-      anchorFound: !!anchor,
-      anchorId: anchor ? anchor.id || anchor.tagName.toLowerCase() : null,
+      anchorFound: chain.length > 0,
+      anchorCount: chain.length,
+      anchorId: chain.length ? chain[0].box.id || chain[0].box.tagName.toLowerCase() : null,
       mounted: !!(node && node.isConnected),
-      visible: !!(node && visibleBox(node)),
-      plainSkin: !!(node && node.classList.contains('v2t-entry-plain')),
+      visible: m.ok,
+      why: m.ok ? '' : m.why || lastEntryWhy,
+      mediaTracks: audioCandidates().length,
+      perfMedia: mediaUrlsFromTimeline().length,
       flexTotal: document.querySelectorAll('#flexible-item-buttons').length,
       flexVisible: anyVisible('#flexible-item-buttons'),
       topVisible: anyVisible('#top-level-buttons-computed'),
@@ -1418,7 +1602,7 @@
     syncEntry();
 
     // YouTube 是 SPA：路由切换、局部重渲染都会把我们的节点冲掉，得反复补挂。
-    // 开销控制：只有在「节点不在了 / 又变回兜底样式 / 被藏起来了」才做完整同步。
+    // 开销控制：只有在「节点不在了 / 被藏起来了」才做完整同步。
     var queued = false;
     function schedule() {
       if (queued) return;
@@ -1442,9 +1626,12 @@
 
     // 兜底轮询：容器被折叠、站点改样式这类变化**不产生 childList 变动**，
     // MutationObserver 等不到（而入口正好会因此变得不可见）。
-    // 前 30 秒每秒看一次（覆盖首屏渲染），之后降到每 4 秒一次；
-    // 一次检查的成本只有 getElementById + 一次测量，可以忽略。
+    // 前 30 秒每秒看一次（覆盖首屏渲染），之后降到每 4 秒一次。
     var tries = 0;
+    function tick() {
+      if (entryHealthy()) return;
+      syncEntry();
+    }
     var poll = setInterval(function () {
       tries++;
       if (tries === 30) {
@@ -1453,11 +1640,6 @@
       }
       tick();
     }, 1000);
-
-    function tick() {
-      if (entryHealthy()) return;
-      syncEntry();
-    }
   }
 
   /* ==================== 启动 ==================== */
@@ -1480,9 +1662,11 @@
       applySettings(null);
     }
 
-    mediaBadge();
-    // 有些页面是懒加载视频，隔一会儿再看一眼（仅用于点亮小圆点，开销可忽略）
-    setTimeout(mediaBadge, 2500);
-    setTimeout(mediaBadge, 7000);
+    refreshMediaInfo();
+    refreshCaptions();
+    // 播放器是懒加载的，隔一会儿再看一眼（只更新那行提示文字，开销可忽略）
+    setTimeout(refreshMediaInfo, 3000);
+    setTimeout(refreshMediaInfo, 8000);
+    setInterval(refreshMediaInfo, 15000);
   })();
 })();

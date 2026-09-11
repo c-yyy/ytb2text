@@ -182,6 +182,8 @@ async function main() {
   check('Service Worker 启动成功（background.js 没写崩）', swUp);
 
   // 3. content script 注入 + 面板结构
+  //    面板只在 YouTube 上自动注入（manifest 的 matches 只写了 YouTube），
+  //    所以本地测试页要手动注入一次 —— 走的是和 popup「打开面板」一样的兜底路径。
   const created = await fetch(
     'http://127.0.0.1:' + CDP_PORT + '/json/new?' + encodeURIComponent('http://127.0.0.1:' + PORT + '/test'),
     { method: 'PUT' }
@@ -191,6 +193,33 @@ async function main() {
   await page.ready;
   await page.send('Runtime.enable');
   await page.send('Page.enable');
+
+  const swList = await getJSON('http://127.0.0.1:' + CDP_PORT + '/json/list').catch(() => []);
+  const swTarget =
+    swList.find((t) => t.type === 'service_worker' && t.url.indexOf(extId) >= 0) ||
+    swList.find((t) => t.url.indexOf('background.js') >= 0);
+  let injectMsg = '(没找到 SW 调试目标)';
+  if (swTarget) {
+    const sw = new CDP(swTarget.webSocketDebuggerUrl);
+    await sw.ready;
+    await sw.send('Runtime.enable');
+    injectMsg = await sw.eval(
+      `(async function(){
+        var tabs = await chrome.tabs.query({});
+        var t = tabs.find(function(x){ return /127\\.0\\.0\\.1|localhost/.test(x.url || ''); });
+        if (!t) return '找不到测试页标签';
+        try {
+          await chrome.scripting.insertCSS({ target: { tabId: t.id }, files: ['content.css'] });
+          await chrome.scripting.executeScript({ target: { tabId: t.id },
+            files: ['lib/constants.js', 'lib/audio.js', 'lib/export.js', 'content.js'] });
+          return 'ok';
+        } catch (e) { return 'err:' + e.message; }
+      })()`,
+      30000
+    );
+    sw.close();
+  }
+  check('本地测试页手动注入 content script（popup 的兜底路径）', injectMsg === 'ok', String(injectMsg));
 
   // 截图工具：顺便产出 README 用的图，也方便肉眼验收 UI
   const shotDir = path.join(ROOT, 'screenshots');
@@ -214,6 +243,13 @@ async function main() {
   check('content script 在页面里注入了面板根节点 #v2t-root', injected);
 
   if (injected) {
+    // 下拉是读到 storage 之后才填的，等它填完再量结构
+    await waitFor(
+      page,
+      "!!document.getElementById('v2t-model') && document.getElementById('v2t-model').options.length > 0",
+      15000,
+      200
+    );
     const shape = await page.eval(`(function(){
       var root = document.getElementById('v2t-root');
       var panel = root.querySelector('.v2t-panel');
@@ -224,7 +260,7 @@ async function main() {
         hasFab: !!fab,
         hasPanel: !!panel,
         panelHidden: panel.hidden,
-        srcButtons: root.querySelectorAll('.v2t-src').length,
+        goBtn: !!root.querySelector('#v2t-go'),
         selects: root.querySelectorAll('select').length,
         modelOptions: root.querySelector('#v2t-model').options.length,
         langOptions: root.querySelector('#v2t-lang').options.length,
@@ -236,8 +272,8 @@ async function main() {
       };
     })()`);
     check(
-      '面板结构完整（悬浮按钮 + 面板 + 3 来源按钮 + 4 下拉）',
-      shape.hasFab && shape.hasPanel && shape.srcButtons === 3 && shape.selects === 4,
+      '面板结构完整（悬浮按钮 + 面板 + 一键转写按钮 + 4 个设置下拉）',
+      shape.hasFab && shape.hasPanel && shape.goBtn && shape.selects === 4,
       JSON.stringify(shape)
     );
     check('模型/语言下拉已用 constants 填充', shape.modelOptions === 5 && shape.langOptions === 12,
@@ -264,58 +300,50 @@ async function main() {
     const shotted = await shot('panel-overview.png');
     check('截图产出 screenshots/panel-overview.png', shotted);
 
-    // 把 <audio> 的 src 换成 blob:（模拟 YouTube/B站那种 MSE 流媒体），
-    // 让「页面内视频」里出现一条拿不到原始文件的媒体
+    // 给页面塞一条真的能出声的媒体（WAV 正弦波），并把它变成 blob: 源 ——
+    // 模拟 YouTube 那种拿不到直连文件的场景
     const blobReady = await page.eval(`(async function(){
       var r = await fetch('/media/tone.wav');
       var b = await r.blob();
       var el = document.getElementById('a');
       el.src = URL.createObjectURL(b);
       await new Promise(function(res){ el.onloadedmetadata = res; setTimeout(res, 3000); });
-      return String(el.currentSrc || el.src).indexOf('blob:') === 0;
+      return String(el.currentSrc || el.src).indexOf('blob:') === 0 && el.duration > 0;
     })()`);
-    check('测试页就绪：<audio> 的 src 是 blob:（流媒体场景）', blobReady);
+    check('测试页就绪：<audio> 是 blob: 源且有真实时长（流媒体场景）', blobReady);
 
-    // 点一下「页面内视频」，让面板载入媒体列表，截一张有内容的图
-    await page.eval(
-      "(function(){ var b = document.getElementById('v2t-root').querySelector('.v2t-src[data-src=page]'); if (b) b.click(); return true; })()"
+    // 一键转写：这里没有 CDN 媒体请求可抓，应当**自动**退到「边播边录」，
+    // 而不是甩一句「请去录制」的死胡同 —— 这条同时验证兜底链路是通的。
+    await page.eval("(function(){ var b = document.getElementById('v2t-go'); if (b) b.click(); return true; })()");
+
+    const recState = await waitFor(
+      page,
+      `(function(){
+        var root = document.getElementById('v2t-root');
+        var rp = root.querySelector('.v2t-sub-panel');
+        if (!rp || rp.hidden) return '';
+        var timer = root.querySelector('.v2t-rec-timer');
+        var el = document.getElementById('a');
+        return JSON.stringify({
+          timer: timer ? timer.textContent : null,
+          playing: !!el && !el.paused,
+          src: String((el && el.currentSrc) || '').slice(0, 12)
+        });
+      })()`,
+      30000,
+      500
     );
-    await sleep(900);
-    await shot('panel-page-video.png');
-
-    // 流媒体那条的按钮应该是「边播边录」，不是「转录」
-    const labels = await page.eval(
-      "(function(){ var out=[]; document.querySelectorAll('#v2t-root .v2t-item .v2t-mini').forEach(function(b){out.push(b.textContent)}); return out.join(','); })()"
+    let recObj = {};
+    try { recObj = JSON.parse(recState || '{}'); } catch (e) { recObj = {}; }
+    await sleep(1800);
+    const timerNow = await page.eval(
+      "(function(){ var t = document.getElementById('v2t-root').querySelector('.v2t-rec-timer'); return t ? t.textContent : null; })()"
     );
-    check('blob: 那条媒体被标为「边播边录」（不再是点了必报错的「转录」）',
-      String(labels).indexOf('边播边录') >= 0, '列表按钮=' + labels);
-
-    // 真机跑一遍「边播边录」：开启录制 → 录 2 秒 → 停止 → 必须进入解码，而不是报错
-    const clicked = await page.eval(`(function(){
-      var rows = document.querySelectorAll('#v2t-root .v2t-item');
-      for (var i = 0; i < rows.length; i++) {
-        var b = rows[i].querySelector('.v2t-mini');
-        if (b && b.textContent === '边播边录') { b.click(); return 'clicked'; }
-      }
-      return 'not-found';
-    })()`);
-    await sleep(2000);
-    const recState = await page.eval(`(function(){
-      var root = document.getElementById('v2t-root');
-      var timer = root.querySelector('.v2t-rec-timer');
-      var tip = root.querySelector('.v2t-rec-tip');
-      var card = root.querySelector('#v2t-progress-card');
-      var ptxt = card.querySelectorAll('.v2t-hint')[0];
-      var a = document.getElementById('a');
-      return { timer: timer ? timer.textContent : null,
-               tip: tip ? tip.textContent : null,
-               text: ptxt ? ptxt.textContent : null,
-               cardHidden: card.hidden,
-               playing: !!a && !a.paused };
-    })()`);
-    check('点「边播边录」后进入录制态（计时在走 + 播放器被自动播放）',
-      clicked === 'clicked' && recState.timer !== '00:00' && recState.playing,
-      JSON.stringify(recState));
+    check(
+      '拿不到直连地址时自动进入「边播边录」（计时在走 + 播放器自动播起来）',
+      !!recState && recObj.playing === true && timerNow && timerNow !== '00:00',
+      JSON.stringify({ recObj, timerNow })
+    );
 
     await page.eval(
       "(function(){ var b=document.getElementById('v2t-root').querySelector('#v2t-stop-rec'); if(b) b.click(); return true; })()"

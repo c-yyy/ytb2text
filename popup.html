@@ -10,7 +10,7 @@
     <div class="card">
       <header class="head">
         <div class="logo">视频转文字<span class="tag">V2T</span></div>
-        <div class="ver" id="ver">v0.2.0</div>
+        <div class="ver" id="ver">v0.3.0</div>
       </header>
 
       <section class="notice">
@@ -24,11 +24,8 @@
       <section class="block">
         <h3>怎么用</h3>
         <ol>
-          <li>
-            打开有视频的页面：<em>YouTube 观看页</em>会在「分享 / 保存」那一行多出一个
-            <em>「转文字」按钮</em>；其它页面用右下角的<em>悬浮按钮</em>。
-          </li>
-          <li>点开面板，选一种音频来源：<em>录制标签页</em> / <em>本地文件</em> / <em>页面内视频</em>。</li>
+          <li>打开任意 <em>YouTube 视频页</em>，「分享 / 保存 / 下载」那一行会多出一个<em>「转文字」按钮</em>。</li>
+          <li>点它打开面板 → 点<em>「开始转写」</em>。音频是直接取下来的，<b>不需要录制</b>。</li>
           <li>等进度条走完，结果可直接<em>复制</em>或导出 <em>TXT / SRT / VTT</em>。</li>
         </ol>
       </section>
@@ -36,10 +33,11 @@
       <section class="block">
         <h3>说明</h3>
         <ul>
+          <li>目前只在 <b>YouTube</b> 上出现入口；其它页面不会有任何浮窗。</li>
           <li>首次转录会下载一次模型（Base 约 75MB），之后由浏览器缓存，<b>完全离线可跑</b>。</li>
           <li>有独显时自动走 <b>WebGPU</b>，接近实时；纯 CPU 下会慢一些。</li>
-          <li>带字幕的站点（如 YouTube）可直接取字幕，<b>不用跑模型</b>。</li>
-          <li>流媒体（YouTube / B站等）拿不到原始文件，面板里会显示为<b>「边播边录」</b>，按播放速度实时录，最长 15 分钟。</li>
+          <li>视频自带字幕时，面板里会出现<em>「直接取字幕」</em>，不用跑模型。</li>
+          <li>音频是整条下载后解码的，<b>比实时录制快得多</b>；只有下载被站点拦掉时才会自动退成边播边录。</li>
         </ul>
       </section>
 

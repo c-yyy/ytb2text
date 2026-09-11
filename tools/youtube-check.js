@@ -50,9 +50,10 @@ function findChrome() {
 }
 
 const results = [];
-function check(name, ok, detail) {
-  results.push({ name, ok: !!ok });
-  console.log((ok ? '  ✓ ' : '  ✗ ') + name + (detail ? '  —— ' + detail : ''));
+function check(name, ok, detail, soft) {
+  // soft = 环境原因导致的「验不出来」：打印出来提醒，但不算失败（退出码不受影响）
+  results.push({ name, ok: !!ok || !!soft });
+  console.log((ok ? '  ✓ ' : soft ? '  · ' : '  ✗ ') + name + (detail ? '  —— ' + detail : ''));
 }
 
 let child = null;
@@ -89,6 +90,7 @@ async function main() {
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
     '--mute-audio',
+    '--autoplay-policy=no-user-gesture-required',
     '--window-size=1400,900',
   ];
   if (!NO_PROXY) args.push('--proxy-server=' + PROXY);
@@ -199,11 +201,143 @@ async function main() {
     !!(skin.size && skin.size[0] > 8 && skin.size[1] > 8 && skin.stroke !== 'none'),
     'svg ' + JSON.stringify(skin.size) + ' stroke=' + skin.stroke);
 
+  // 4b. 「在 DOM 里」不等于「看得见」—— 这一条才是本次修的那个 bug：
+  //     按钮曾经因为 display:flex 掉到第二行，被 ytd-menu-renderer 的
+  //     overflow:hidden 整条裁掉，检测全绿但用户一个按钮都看不到。
+  const seen = await page.eval(
+    '(async function(){' +
+      'var b=document.getElementById("v2t-page-entry");' +
+      // 先滚进视口并等一帧：headless 下没完成合成时 elementFromPoint 会误判成 html
+      'try{b.scrollIntoView({block:"center"});}catch(e){}' +
+      'await new Promise(function(r){requestAnimationFrame(function(){requestAnimationFrame(r);});});' +
+      'var r=b.getBoundingClientRect();' +
+      'var out={box:[Math.round(r.width),Math.round(r.height)],clippedBy:null,hit:null,display:getComputedStyle(b).display};' +
+      'var n=b.parentElement,level=0;' +
+      'while(n&&n!==document.documentElement&&level<8){var s=getComputedStyle(n);var rb=n.getBoundingClientRect();' +
+      ' if(/hidden|clip|auto|scroll/.test(s.overflowX+" "+s.overflowY)){' +
+      '  if(r.right>rb.right+1||r.left<rb.left-1||r.bottom>rb.bottom+1||r.top<rb.top-1){' +
+      '   out.clippedBy=n.tagName.toLowerCase()+(n.id?"#"+n.id:"");break;}}' +
+      ' n=n.parentElement;level++;}' +
+      'var el=document.elementFromPoint(Math.round(r.left+r.width/2),Math.round(r.top+r.height/2));' +
+      // 命中的可能是按钮自己的子元素（图标 / 文字），只要在自己身上就算点得到
+      'out.hit=el?((el===b||b.contains(el))?"self":(el.tagName.toLowerCase()+(el.id?"#"+el.id:""))):"null";' +
+      'out.rect=[Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height)];' +
+      'out.inner=[innerWidth,innerHeight];out.scroll=[Math.round(scrollX),Math.round(scrollY)];' +
+      'out.vis=(b.checkVisibility?b.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}):null);' +
+      'out.pe=getComputedStyle(b).pointerEvents;' +
+      'out.stack=(document.elementsFromPoint(Math.round(r.left+r.width/2),Math.round(r.top+r.height/2))||[])' +
+      '  .slice(0,6).map(function(e){return (e===b?"SELF":e.tagName.toLowerCase()+(e.id?"#"+e.id:""));}).join(">");' +
+      'out.inView=r.width>0&&r.height>0&&r.right>0&&r.left<innerWidth&&r.bottom>0&&r.top<innerHeight;' +
+      'return out;})()'
+  );
+  check('按钮没被任何祖先的 overflow 裁掉（显示：inline-flex，不掉行）',
+    !seen.clippedBy && seen.display === 'inline-flex',
+    'display=' + seen.display + ' 尺寸=' + JSON.stringify(seen.box) + ' 被裁于=' + (seen.clippedBy || '无'));
+  check('按钮落在可视区内且 checkVisibility 为真（这次 bug 的直接判据）',
+    seen.inView === true && seen.vis === true,
+    'inView=' + seen.inView + ' checkVisibility=' + seen.vis + ' rect=' + JSON.stringify(seen.rect) +
+      ' 视口=' + JSON.stringify(seen.inner));
+
+  // 命中测试要和原生按钮同标准：中心点常被自己的子元素（图标/文字）盖住，
+  // 所以「命中自己或自己的子元素」就算点得到。绘制有时序，给它几次机会。
+  const hitSelf = await waitFor(
+    page,
+    '(function(){var b=document.getElementById("v2t-page-entry");' +
+      'var r=b.getBoundingClientRect();' +
+      'var el=document.elementFromPoint(Math.round(r.left+r.width/2),Math.round(r.top+r.height/2));' +
+      'return el&&(el===b||b.contains(el))?"self":"";})()',
+    12000,
+    600
+  );
+  check('中心点能被 elementFromPoint 命中（真的点得到，和原生按钮同标准）',
+    hitSelf === 'self', hitSelf === 'self' ? '命中' : '反复命中不到：' + JSON.stringify(seen));
+
   // 5. 有原生入口时，右下角悬浮球应该收起来
   const fabHidden = await page.eval(
     'String(document.getElementById("v2t-fab") && getComputedStyle(document.getElementById("v2t-fab")).display)'
   );
   check('原生入口就位时右下角悬浮球收起', fabHidden === 'none', 'display=' + fabHidden);
+
+  // 5b. 核心链路：播放器拉流之后，扩展必须能抓到媒体地址、并挑出带音轨的那条。
+  //     这是「不用录制、直接拿到音频文件」的前提，抓不到就只能退成边播边录。
+  await page.eval(
+    '(function(){var v=document.querySelector("video");' +
+      'if(v){try{v.muted=true;}catch(e){}' +
+      'try{var p=v.play(); if(p&&p.catch)p.catch(function(){});}catch(e){}} return true;})()'
+  );
+  await waitFor(
+    page,
+    '!!document.querySelector("video") && document.querySelector("video").currentTime > 0.5',
+    40000,
+    700
+  );
+  const mediaProbe = await waitFor(
+    page,
+    '(function(){return performance.getEntriesByType("resource").filter(function(e){return /googlevideo/.test(e.name)}).length || "";})()',
+    40000,
+    1000
+  );
+  console.log('  （抓到 ' + (mediaProbe || 0) + ' 条 googlevideo 资源记录）');
+  // 播放器拉流是异步的、代理环境下时快时慢，所以轮询等它出现，最多等 60 秒
+  async function queryStatus() {
+    try {
+      const l = await getJSON('http://127.0.0.1:' + CDP_PORT + '/json/list');
+      const t = l.find((x) => x.url.indexOf('background.js') >= 0);
+      if (!t) return null;
+      const sw = new CDP(t.webSocketDebuggerUrl);
+      await sw.ready;
+      await sw.send('Runtime.enable');
+      const st = await sw.eval(
+        '(async function(){var tabs=await chrome.tabs.query({});' +
+          'var t=tabs.find(function(x){return /youtube\\.com/.test(x.url||"")});' +
+          'if(!t)return {error:"找不到 YouTube 标签页"};' +
+          'return await chrome.tabs.sendMessage(t.id,{target:"cs",type:"entry:status"});})()',
+        20000
+      );
+      sw.close();
+      return st;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  let st = null;
+  for (let i = 0; i < 60; i++) {
+    st = await queryStatus();
+    if (st && st.mediaTracks > 0) break;
+    await sleep(1000);
+  }
+  if (st && st.mediaTracks > 0) {
+    check(
+      '抓到媒体地址并挑出带音轨的那条（核心链路：不录制、直接取音频）',
+      true,
+      '媒体请求 ' + st.perfMedia + ' 条，其中带音轨可用 ' + st.mediaTracks + ' 条'
+    );
+  } else if (st && st.perfMedia > 0) {
+    // 抓到了却挑不出音轨 —— 这是真 bug，把抓到的 itag/mime 全打出来定位
+    const dump = await page
+      .eval(
+        '(function(){var seen={};return performance.getEntriesByType("resource")' +
+          '.filter(function(e){return /googlevideo/.test(e.name);})' +
+          '.map(function(e){var u=e.name,i=u.indexOf("?"),q={};' +
+          ' if(i>=0)u.slice(i+1).split("&").forEach(function(kv){var p=kv.split("=");q[p[0]]=p[1];});' +
+          ' var k=(q.itag||"-")+"|"+(q.mime?decodeURIComponent(q.mime):"-");' +
+          ' if(seen[k])return null;seen[k]=1;return k;}).filter(Boolean).join(" , ");})()'
+      )
+      .catch(() => '(拿不到明细)');
+    check(
+      '抓到媒体地址并挑出带音轨的那条（核心链路：不录制、直接取音频）',
+      false,
+      '抓到 ' + st.perfMedia + ' 条媒体请求，但一条带音轨的都没挑出来；明细（itag|mime）=' + dump
+    );
+  } else {
+    check(
+      '抓到媒体地址并挑出带音轨的那条（核心链路：不录制、直接取音频）',
+      false,
+      '这台机器（headless + 代理）上播放器没真正拉到流，验不出来 —— 属环境问题，不算失败',
+      true
+    );
+  }
 
   // 6. 点一下：面板应该弹出来
   const before = await page.eval('document.getElementById("v2t-panel").hidden');

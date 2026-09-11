@@ -247,72 +247,6 @@
   border-bottom: 2px solid var(--v2t-ink);
 }
 
-/* ==================== 来源三选一 ==================== */
-
-#v2t-root .v2t-sources {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-#v2t-root .v2t-src {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 8px 9px;
-  background: #fff;
-  border: 2px solid var(--v2t-ink);
-  border-radius: 8px;
-  cursor: pointer;
-  box-shadow: 3px 3px 0 var(--v2t-ink);
-  transition: background 0.12s, transform 0.08s, box-shadow 0.08s;
-}
-
-#v2t-root .v2t-src:hover {
-  background: var(--v2t-accent-soft);
-}
-
-#v2t-root .v2t-src:active {
-  transform: translate(1px, 1px);
-  box-shadow: 2px 2px 0 var(--v2t-ink);
-}
-
-#v2t-root .v2t-src.on {
-  background: var(--v2t-accent);
-  color: #fff;
-}
-
-#v2t-root .v2t-src:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: 3px 3px 0 var(--v2t-ink);
-}
-
-#v2t-root .v2t-src .v2t-ico {
-  font-size: 11px;
-  line-height: 1;
-  color: var(--v2t-accent);
-}
-
-#v2t-root .v2t-src.on .v2t-ico {
-  color: #fff;
-}
-
-#v2t-root .v2t-src .v2t-lbl {
-  font-size: 12px;
-  font-weight: 700;
-}
-
-#v2t-root .v2t-src .v2t-sub {
-  font-size: 10px;
-  color: var(--v2t-muted);
-}
-
-#v2t-root .v2t-src.on .v2t-sub {
-  color: rgba(255, 255, 255, 0.85);
-}
-
 /* ==================== 通用文本 / 按钮 ==================== */
 
 #v2t-root .v2t-hint {
@@ -498,12 +432,6 @@
   }
 }
 
-#v2t-root .v2t-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
 #v2t-root .v2t-list:not(:empty) + .v2t-list:not(:empty) {
   margin-top: 8px;
 }
@@ -537,24 +465,6 @@
   border-radius: 4px;
   background: var(--v2t-accent-soft);
   color: var(--v2t-accent-dark);
-}
-
-#v2t-root .v2t-mini {
-  flex: 0 0 auto;
-  padding: 3px 9px;
-  font-size: 11px;
-  font-weight: 700;
-  background: var(--v2t-accent-soft);
-  color: var(--v2t-accent-dark);
-  border: 2px solid var(--v2t-ink);
-  border-radius: 6px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-#v2t-root .v2t-mini:hover {
-  background: var(--v2t-accent);
-  color: #fff;
 }
 
 #v2t-root .v2t-empty {

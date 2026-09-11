@@ -1,12 +1,11 @@
 {
   "manifest_version": 3,
   "name": "视频转文字助手 · 本地 AI",
-  "version": "0.2.2",
-  "description": "页面内一键把视频/音频转成文字。Whisper 全程在本机运行 —— 音频不上传、不需要 API Key、运行过程 0 调用成本。",
+  "version": "0.3.0",
+  "description": "YouTube 观看页一键把视频转成文字。Whisper 全程在本机运行 —— 音频不上传、不需要 API Key、运行过程 0 调用成本。",
   "minimum_chrome_version": "116",
 
   "permissions": [
-    "tabCapture",
     "offscreen",
     "storage",
     "activeTab",
@@ -43,7 +42,13 @@
 
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
+      "matches": [
+        "*://www.youtube.com/*",
+        "*://youtube.com/*",
+        "*://m.youtube.com/*",
+        "*://www.youtube-nocookie.com/*",
+        "*://youtube-nocookie.com/*"
+      ],
       "js": ["lib/constants.js", "lib/audio.js", "lib/export.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle",

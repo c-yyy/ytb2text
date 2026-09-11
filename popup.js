@@ -51,23 +51,42 @@ document.addEventListener('DOMContentLoaded', function () {
     out.push('页面：' + s.host);
 
     if (!s.supported) {
-      out.push('✗ 这个站点没有配置原生入口（目前只做了 YouTube 观看页）。');
-      out.push(s.fabVisible ? '→ 用右下角的悬浮按钮打开面板即可。' : '→ 也看不到悬浮按钮：试试刷新页面，或在浏览器扩展页里点「重新加载」。');
+      out.push('✗ 这个站点没有配置原生入口（目前只做 YouTube）。');
+      out.push('→ 面板只在 YouTube 页面出现，请打开一个 YouTube 视频页。');
       return out.join('\n');
     }
 
     out.push('✓ 命中站点规则：' + s.siteName);
-    out.push((s.anchorFound ? '✓ 找到可挂载的操作栏' : '✗ 没找到可挂载的操作栏') +
-      (s.anchorFound ? '（' + s.anchorId + '）' : '（还没渲染出来，或已被折叠）'));
+    out.push(
+      (s.anchorFound ? '✓ 找到可挂载的操作栏' : '✗ 没找到可挂载的操作栏') +
+        (s.anchorFound
+          ? '（' + s.anchorId + '，共 ' + s.anchorCount + ' 个落点）'
+          : '（还没渲染出来，或已被折叠）')
+    );
     out.push((s.mounted ? '✓ 入口已插入 DOM' : '✗ 入口还没插入'));
-    if (s.mounted && !s.visible) out.push('✗ 插进去了但不可见（容器被折叠）');
-    if (s.plainSkin) out.push('! 用的是兜底样式（没抄到站点原生外观）');
-    out.push((s.fabVisible ? '✓ 悬浮按钮可见（可兜底使用）' : '· 悬浮按钮已收起（入口正常）'));
-    out.push('操作栏探测：flexible=' + (s.flexVisible ? '可见' : '折叠') +
-      '（共 ' + s.flexTotal + ' 个）｜topLevel=' + (s.topVisible ? '可见' : '折叠'));
+    if (s.mounted && !s.visible) out.push('✗ 插进去了但看不见：' + (s.why || '未知原因'));
+    out.push(
+      (s.fabVisible ? '✓ 悬浮按钮可见（可兜底使用）' : '· 悬浮按钮已收起（原生入口正常）')
+    );
+    out.push(
+      '抓取到的媒体请求：' +
+        s.perfMedia +
+        ' 条，其中带音轨可用 ' +
+        s.mediaTracks +
+        ' 条' +
+        (s.mediaTracks ? '' : '（让视频播几秒再试）')
+    );
+    out.push(
+      '操作栏探测：flexible=' +
+        (s.flexVisible ? '可见' : '折叠') +
+        '（共 ' +
+        s.flexTotal +
+        ' 个）｜topLevel=' +
+        (s.topVisible ? '可见' : '折叠')
+    );
 
-    if (s.mounted && s.visible && !s.plainSkin) out.push('→ 一切正常。');
-    else if (s.fabVisible) out.push('→ 入口没挂上，但悬浮按钮在，先点那个用。');
+    if (s.mounted && s.visible) out.push('→ 一切正常。');
+    else if (s.fabVisible) out.push('→ 原生入口没挂上，但悬浮按钮在，先点那个用。');
     else out.push('→ 两个入口都没有：在扩展页点「重新加载」后刷新本页。');
     return out.join('\n');
   }

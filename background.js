@@ -44,8 +44,8 @@ async function ensureOffscreen() {
   creating = chrome.offscreen
     .createDocument({
       url: OFFSCREEN_URL,
-      reasons: ['USER_MEDIA', 'WORKERS', 'LOCAL_STORAGE', 'BLOBS'],
-      justification: '在后台运行 Whisper 本地推理，并对标签页音频进行录制',
+      reasons: ['WORKERS', 'LOCAL_STORAGE', 'BLOBS'],
+      justification: '在后台运行 Whisper 本地推理（WebGPU / WASM 需要 Worker，模型缓存在本地存储）',
     })
     .catch((err) => {
       // 已经存在同名文档时会抛错，忽略即可
@@ -93,12 +93,29 @@ const CS_FILES = ['lib/constants.js', 'lib/audio.js', 'lib/export.js', 'content.
 /**
  * 向目标标签页的面板发消息；页面是扩展安装/更新前就打开的、或者刚被刷新丢了
  * 注入时，content script 不存在会发送失败 —— 此时补一次手动注入再重试。
+ *
+ * 面板只在 YouTube 上出现，所以非 YouTube 页面一律不补注入（补了也没用，
+ * 还会在受限页面上刷一堆报错）。
  */
+const YOUTUBE = /^https?:\/\/(www\.|m\.)?(youtube\.com|youtube-nocookie\.com)\//i;
+
+async function isYoutubeTab(tabId) {
+  try {
+    const t = await chrome.tabs.get(tabId);
+    return !!(t && t.url && YOUTUBE.test(t.url));
+  } catch (e) {
+    return false;
+  }
+}
+
 async function sendToPanel(tabId, message) {
   try {
     const res = await chrome.tabs.sendMessage(tabId, message);
     return { ok: true, res };
   } catch (e) {
+    if (!(await isYoutubeTab(tabId))) {
+      throw new Error('这个页面不是 YouTube，面板只在 YouTube 上出现。');
+    }
     try {
       await chrome.scripting.insertCSS({ target: { tabId }, files: ['content.css'] });
       await chrome.scripting.executeScript({ target: { tabId }, files: CS_FILES });
@@ -130,17 +147,6 @@ async function broadcastToPanels(message) {
 
 async function handleSW(type, payload) {
   switch (type) {
-    case 'tab:getStreamId': {
-      let tabId = payload.tabId;
-      if (tabId == null) {
-        const tab = await getActiveTab();
-        tabId = tab && tab.id;
-      }
-      if (tabId == null) throw new Error('找不到当前标签页');
-      const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-      return { ok: true, streamId, tabId };
-    }
-
     case 'panel:toggle': {
       let tabId = payload.tabId;
       if (tabId == null) {
@@ -201,6 +207,20 @@ async function handleSW(type, payload) {
         // 受限页面 / 站点不支持，返回空列表即可，不要打断面板
         return { ok: true, tracks: [] };
       }
+    }
+
+    // 页面内下载被拦（CORS / 403）时的备用链路：SW 有 host 权限，不受 CORS 限制。
+    // 二进制走 base64 回传（sendMessage 是 JSON 序列化），所以限制在 40MB 以内。
+    case 'media:fetch': {
+      const r = await fetch(payload.url, { credentials: 'omit' });
+      if (!r.ok) throw new Error('媒体下载失败：HTTP ' + r.status);
+      const buf = new Uint8Array(await r.arrayBuffer());
+      if (buf.byteLength > 40 * 1024 * 1024) throw new Error('媒体太大（>40MB），已放弃');
+      let s = '';
+      for (let i = 0; i < buf.length; i += 0x8000) {
+        s += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+      }
+      return { ok: true, b64: btoa(s), bytes: buf.byteLength };
     }
 
     // 字幕文件由 SW 去取：扩展 SW 有 <all_urls> 的 host 权限，不受 CORS 限制；
